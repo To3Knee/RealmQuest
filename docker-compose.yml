@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  architect-bot:
+    build: ./bot
+    env_file: .env
+    volumes:
+      - ./bot:/app
+      # ADD THIS LINE BELOW: Maps your local Windows folder to a folder inside Docker
+      - C:/GitHub/Collision-Stone-Campaign:/app/campaign
+    depends_on:
+      - portal-ui
+
+  portal-ui:
+    build: ./portal
+    ports:
+      - "8501:8501"
+    env_file: .env
+    volumes:
+      - ./portal:/app
+      # ADD THIS LINE HERE TOO so the Portal can show character stats
+      - C:/GitHub/Collision-Stone-Campaign:/app/campaign
+
+  foundry-vtt:
+    image: felddy/foundryvtt:latest
+    ports:
+      - "30000:30000"
+    volumes:
+      - ./foundry/data:/data
+    env_file: .env
