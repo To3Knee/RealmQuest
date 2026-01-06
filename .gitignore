@@ -1,0 +1,13 @@
+# Windows System Files
+Thumbs.db
+desktop.ini
+
+# Secrets (DO NOT PUSH THESE)
+.env
+*.log
+
+# Docker/Node/Python
+node_modules/
+__pycache__/
+.venv/
+foundry/data/
