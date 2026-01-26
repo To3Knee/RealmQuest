@@ -1,11 +1,11 @@
 //===============================================================
-//Script Name: App.jsx (v18.2 - Systems Online)
+//Script Name: App.jsx (v18.7 - Cognitive Control)
 //Script Location: /opt/RealmQuest/portal/src/App.jsx
-//Date: 2026-01-24
+//Date: 2026-01-26
 //Created By: T03KNEE
 //Github: https://github.com/To3Knee/RealmQuest
-//Version: 18.2.0
-//About: Port Fixes, Audio Sync, Discord Live, & Config Patch
+//Version: 18.7.0
+//About: Added Cortex Tab for Memory Management & Soul Linking
 //===============================================================
 
 import { useState, useEffect, useRef } from 'react'
@@ -17,7 +17,8 @@ import {
   Sword, Shield, Heart, Coins, FolderOpen, CheckCircle, Sparkles, Hammer, Map, Trash2,
   BookOpen, HelpCircle, Gift, UserPlus, Music, Radio, Dices, UserCircle, 
   Image as ImageIcon, Scroll, Link as LinkIcon, Edit3, Send, Skull, Feather, Flame, Zap,
-  Upload, ChevronDown, Repeat, Eraser, Crosshair, Headphones, Signal, CloudLightning
+  Upload, ChevronDown, Repeat, Eraser, Crosshair, Headphones, Signal, CloudLightning,
+  BrainCircuit, Eraser as WipeIcon, ShieldCheck
 } from 'lucide-react'
 
 // --- DYNAMIC CONNECTION (Fixes Port 8000/8001 mismatch) ---
@@ -33,7 +34,8 @@ const S = {
   card: "bg-[#0a0a0a]/90 backdrop-blur-md border border-[#333] rounded-xl p-6 shadow-2xl transition-all duration-300 hover:border-yellow-600/30",
   input: "w-full bg-black/50 border border-[#333] rounded-lg px-4 py-2 text-sm text-gray-200 focus:border-yellow-500 focus:outline-none focus:ring-1 focus:ring-yellow-500/50 transition-all font-mono",
   editableText: "bg-transparent border-b border-transparent hover:border-[#333] focus:border-yellow-600 focus:outline-none transition-colors text-center w-full",
-  btnPrimary: "bg-gradient-to-r from-yellow-700 to-yellow-600 text-black font-bold uppercase tracking-widest px-6 py-3 rounded shadow-[0_0_15px_rgba(202,138,4,0.3)] hover:scale-105 hover:shadow-[0_0_25px_rgba(202,138,4,0.5)] transition-all flex items-center justify-center gap-2 text-xs cursor-pointer",
+  btnPrimary: "bg-gradient-to-r from-yellow-700 to-yellow-600 text-black font-bold uppercase tracking-widest px-6 py-3 rounded shadow-[0_0_15px_rgba(202,138,4,0.3)] hover:scale-105 hover:shadow-[0_0_25px_rgba(202,138,4,0.5)] transition-all flex items-center justify-center gap-2 text-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+  btnSecondary: "bg-white/5 border border-white/10 text-gray-300 font-bold uppercase tracking-widest px-4 py-2 rounded hover:bg-white/10 hover:border-white/30 transition-all flex items-center justify-center gap-2 text-xs cursor-pointer",
   label: "block text-[10px] uppercase tracking-[0.2em] text-gray-500 font-bold mb-2",
   header: "font-cinematic text-3xl text-transparent bg-clip-text bg-gradient-to-r from-yellow-200 to-yellow-600 mb-8 drop-shadow-sm",
   sectionHeader: "font-cinematic text-xl text-white border-b border-[#333] pb-2 mb-4 flex items-center gap-2",
@@ -98,11 +100,12 @@ export default function App() {
           <h1 className="font-cinematic text-3xl font-bold tracking-widest text-white drop-shadow-[0_0_10px_rgba(255,255,255,0.2)]">REALM<span className="text-yellow-600">QUEST</span></h1>
           <div className="mt-4 flex items-center gap-3 text-[10px] font-mono tracking-[0.2em] uppercase text-gray-600">
              <div className={`w-2 h-2 rounded-full ${status === 'online' ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' 
-             : 'bg-red-500 animate-pulse'}`} /><span>v18.2.0 // {status}</span>
+             : 'bg-red-500 animate-pulse'}`} /><span>v18.7.0 // {status}</span>
           </div>
         </div>
         <nav className="flex-1 px-6 space-y-2 mt-8 overflow-y-auto custom-scrollbar">
           <NavBtn icon={LayoutDashboard} label="Command Center" active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} />
+          <NavBtn icon={BrainCircuit} label="Cortex (AI Brain)" active={activeTab === 'cortex'} onClick={() => setActiveTab('cortex')} />
           <NavBtn icon={UserCircle} label="Player Portal" active={activeTab === 'player'} onClick={() => setActiveTab('player')} />
           <NavBtn icon={Mic2} label="Audio Matrix" active={activeTab === 'audio'} onClick={() => setActiveTab('audio')} />
           
@@ -127,8 +130,9 @@ export default function App() {
         
         <div className="flex-1 overflow-auto p-10 relative z-10 custom-scrollbar">
            {activeTab === 'overview' && <OverviewView config={config} logs={logs} addLog={addLog} onRefresh={refreshData} notify={notify} />}
+           {activeTab === 'cortex' && <CortexView notify={notify} />}
            {activeTab === 'player' && <PlayerPortalView notify={notify} addLog={addLog} />}
-           {activeTab === 'settings' && (showLockScreen ? <LockScreen onUnlock={() => setUserIsAuthenticated(true)} notify={notify} /> : <ConfigView onUpdate={refreshData} notify={notify} showLogout={systemHasPin && userIsAuthenticated} onLogout={async () => { await fetchJSON("system/auth/lock", { method: "POST" }); setShowLockScreen(true); await refreshData(); }} />)}
+           {activeTab === 'settings' && (showLockScreen ? <LockScreen onUnlock={() => setUserIsAuthenticated(true)} notify={notify} /> : <ConfigView onUpdate={refreshData} notify={notify} showLogout={systemHasPin && userIsAuthenticated} onLogout={async () => { await axios.post(`${API_URL}/system/auth/lock`); setUserIsAuthenticated(false); notify("Vault Locked"); }} />)}
            {activeTab === 'audio' && <AudioMatrix config={config} onUpdate={refreshData} notify={notify} />}
            {activeTab === 'chars' && <CharacterMatrix addLog={addLog} notify={notify} />}
            {activeTab === 'logs' && <SystemLogsView notify={notify} />}
@@ -145,6 +149,96 @@ export default function App() {
       )}
     </div>
   )
+}
+
+// -------------------------------------------------------------------------
+// --- 0. CORTEX VIEW (BRAIN MANAGEMENT) ---
+// -------------------------------------------------------------------------
+function CortexView({ notify }) {
+    const [memory, setMemory] = useState([]);
+    const [systemPrompt, setSystemPrompt] = useState("");
+    const [stats, setStats] = useState({ tokens: 0, turns: 0 });
+
+    useEffect(() => {
+        fetchBrainData();
+        const int = setInterval(fetchBrainData, 5000);
+        return () => clearInterval(int);
+    }, []);
+
+    const fetchBrainData = async () => {
+        try {
+            const res = await axios.get(`${API_URL}/game/brain/status`);
+            setMemory(res.data.history || []);
+            setSystemPrompt(res.data.system_prompt || "No Active System Prompt");
+            setStats(res.data.stats || { tokens: 0, turns: 0 });
+        } catch (e) {}
+    };
+
+    const wipeMemory = async () => {
+        if(!confirm("⚠️ WIPE ALL AI SHORT-TERM MEMORY? This cannot be undone.")) return;
+        try {
+            await axios.post(`${API_URL}/game/brain/wipe`);
+            notify("Memory Formatted");
+            fetchBrainData();
+        } catch (e) { notify("Wipe Failed", "error"); }
+    };
+
+    const updatePrompt = async () => {
+        try {
+            await axios.post(`${API_URL}/game/brain/prompt`, { prompt: systemPrompt });
+            notify("Guardrails Updated");
+        } catch (e) { notify("Update Failed", "error"); }
+    };
+
+    return (
+        <div className="max-w-7xl mx-auto pb-20 animate-fade-in">
+             <div className="flex justify-between items-end mb-8">
+                <div>
+                    <h2 className={S.header + " mb-2"}>Cortex Control</h2>
+                    <p className="text-xs font-mono text-gray-500 uppercase tracking-widest">
+                        COGNITIVE LOAD: <span className="text-yellow-500 font-bold">{stats.tokens} TOKENS</span> // TURNS: {stats.turns}
+                    </p>
+                </div>
+                <button onClick={wipeMemory} className="bg-red-900/20 border border-red-500/50 text-red-500 px-4 py-2 rounded hover:bg-red-500 hover:text-white transition-all text-xs font-bold uppercase tracking-widest flex items-center gap-2">
+                    <WipeIcon size={14} /> Wipe Memory
+                </button>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* SYSTEM PROMPT / GUARDRAILS */}
+                <div className={`${S.card} lg:col-span-1 flex flex-col`}>
+                    <h3 className={S.sectionHeader}><ShieldCheck size={18}/> Active Guardrails</h3>
+                    <p className="text-xs text-gray-500 mb-4">The core instructions driving the DM persona.</p>
+                    <textarea 
+                        className="flex-1 bg-black/50 border border-[#333] rounded p-4 font-mono text-[10px] text-gray-300 leading-relaxed resize-none focus:border-yellow-600 focus:outline-none mb-4 min-h-[400px]"
+                        value={systemPrompt}
+                        onChange={(e) => setSystemPrompt(e.target.value)}
+                    />
+                    <button onClick={updatePrompt} className={S.btnPrimary}><Save size={14}/> Update Guardrails</button>
+                </div>
+
+                {/* CONVERSATION HISTORY */}
+                <div className={`${S.card} lg:col-span-2 flex flex-col`}>
+                    <h3 className={S.sectionHeader}><Activity size={18}/> Cognitive Stream (Short-Term Memory)</h3>
+                     <div className="flex-1 bg-black/50 border border-[#333] rounded p-4 overflow-auto custom-scrollbar space-y-4 max-h-[500px]">
+                        {memory.length === 0 && <div className="text-center text-gray-600 text-xs py-10">Memory Empty (Tabula Rasa)</div>}
+                        {memory.map((m, i) => (
+                            <div key={i} className={`flex gap-4 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div className={`max-w-[80%] p-3 rounded border text-xs leading-relaxed ${
+                                    m.role === 'user' 
+                                    ? 'bg-blue-900/10 border-blue-500/30 text-blue-200 rounded-tr-none' 
+                                    : 'bg-yellow-900/10 border-yellow-600/30 text-yellow-100 rounded-tl-none'
+                                }`}>
+                                    <div className="text-[9px] font-bold uppercase tracking-widest opacity-50 mb-1">{m.role}</div>
+                                    {m.content}
+                                </div>
+                            </div>
+                        ))}
+                     </div>
+                </div>
+            </div>
+        </div>
+    )
 }
 
 // -------------------------------------------------------------------------
@@ -564,27 +658,30 @@ function ConfigView({ onUpdate, notify, showLogout = false, onLogout }) {
         <div className="max-w-5xl mx-auto pb-20 animate-fade-in">
             <h2 className={S.header}>Neural Configuration</h2>
             <div className={S.card}>
-                <div className="flex justify-between items-center mb-6 pb-6 border-b border-white/5">
+                {/* HEADER ROW WITH SECURE LOGOUT */}
+                <div className="flex justify-between items-start mb-6 pb-6 border-b border-white/5">
                     <div>
                         <h3 className="font-cinematic text-xl text-white">Environment Vault (.env)</h3>
-                        <p className="text-xs text-red-400 font-mono mt-2">WARNING: Direct modification of system environment variables.</p>
+                        <p className="text-xs text-red-400 font-mono mt-2 flex items-center gap-2"><ShieldAlert size={12}/> RESTRICTED ACCESS: SENSITIVE SECRETS</p>
                     </div>
-                </div>
-                
-                
+                    
                     {showLogout && (
-                      <button
-                        className="px-3 py-2 rounded bg-red-700 hover:bg-red-600 text-white text-sm"
-                        onClick={async () => {
-                          try {
-                            if (onLogout) await onLogout();
-                          } catch (e) {}
-                        }}
-                      >
-                        Log out
-                      </button>
+                        <button
+                            onClick={async () => {
+                                try { if (onLogout) await onLogout(); } catch (e) {}
+                            }}
+                            className="group flex flex-col items-center gap-1 opacity-80 hover:opacity-100 transition-opacity"
+                            title="Seal Vault (Logout)"
+                        >
+                            <div className="w-12 h-12 rounded-full bg-red-900/20 border border-red-500/30 flex items-center justify-center group-hover:bg-red-500 group-hover:text-black group-hover:border-red-500 group-hover:shadow-[0_0_20px_rgba(220,38,38,0.5)] transition-all text-red-500">
+                                <Lock size={20} />
+                            </div>
+                            <span className="text-[9px] uppercase tracking-widest text-red-500 font-bold group-hover:text-red-400">SEAL VAULT</span>
+                        </button>
                     )}
-{/* TABLE HEADER */}
+                </div>
+
+                {/* TABLE HEADER */}
                 <div className="grid grid-cols-12 gap-4 mb-2 px-4 text-[10px] uppercase font-bold text-gray-500 tracking-widest">
                     <div className="col-span-4">Variable Key</div>
                     <div className="col-span-7">Value</div>
@@ -626,6 +723,50 @@ function ConfigView({ onUpdate, notify, showLogout = false, onLogout }) {
                     <input className={S.input} placeholder="Value" type="password" value={newVal} onChange={e => setNewVal(e.target.value)} />
                     <button onClick={handleAdd} disabled={!newKey || !newVal} className={S.btnPrimary}>Add</button>
                 </div>
+            </div>
+        </div>
+    )
+}
+
+function LockScreen({ onUnlock, notify }) {
+    const [pin, setPin] = useState("");
+    const [loading, setLoading] = useState(false);
+
+    const attemptUnlock = async () => {
+        if(!pin) return;
+        setLoading(true);
+        try {
+            await axios.post(`${API_URL}/system/auth/unlock`, { pin });
+            onUnlock();
+            notify("Vault Access Granted");
+        } catch(e) {
+            notify("Access Denied", "error");
+            setPin("");
+        }
+        setLoading(false);
+    };
+
+    return (
+        <div className="flex flex-col items-center justify-center h-[60vh] animate-fade-in">
+            <div className="bg-[#0a0a0a] border border-yellow-600/30 p-10 rounded-2xl shadow-[0_0_50px_rgba(202,138,4,0.1)] text-center relative overflow-hidden">
+                <div className="absolute inset-0 bg-yellow-600/5 blur-xl pointer-events-none" />
+                <Lock size={48} className="text-yellow-600 mx-auto mb-6" />
+                <h2 className="font-cinematic text-3xl text-white mb-2">Security Challenge</h2>
+                <p className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-8">Restricted Access // PIN Required</p>
+                
+                <input 
+                    type="password" 
+                    autoFocus
+                    className="bg-black/50 border border-[#333] rounded px-4 py-3 text-center text-2xl font-mono text-white tracking-[0.5em] w-64 focus:border-yellow-600 focus:outline-none focus:shadow-[0_0_15px_rgba(202,138,4,0.3)] mb-6 placeholder-gray-800"
+                    placeholder="••••"
+                    value={pin}
+                    onChange={e => setPin(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && attemptUnlock()}
+                />
+                
+                <button onClick={attemptUnlock} disabled={loading} className={S.btnPrimary + " w-full"}>
+                    {loading ? <RefreshCw className="animate-spin" /> : "Authenticate"}
+                </button>
             </div>
         </div>
     )

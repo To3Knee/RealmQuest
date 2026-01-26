@@ -1,3 +1,11 @@
+# ===============================================================
+# Script Name: sink.py
+# Script Location: /opt/RealmQuest/bot/core/sink.py
+# Date: 2026-01-26
+# Version: 18.9.0
+# About: Sink with Markdown Stripper & Native Upload
+# ===============================================================
+
 import asyncio
 import discord
 import logging
@@ -5,6 +13,7 @@ import time
 import audioop
 import aiohttp
 import re
+import os
 from collections import deque
 from discord.ext import voice_recv
 from core.audio import convert_pcm_to_wav
@@ -12,11 +21,13 @@ from core import brain
 from core.config import RMS_THRESHOLD, SILENCE_TIMEOUT, MAX_RECORD_TIME, PRE_BUFFER_LEN, API_URL
 
 logger = logging.getLogger("sink")
+CAMPAIGN_ROOT = "/campaigns" 
 
 class ZeroLatencySink(voice_recv.AudioSink):
-    def __init__(self, bot):
+    def __init__(self, bot, source_channel=None):
         super().__init__()
         self.bot = bot
+        self.source_channel = source_channel
         self.queue = asyncio.Queue()
         self.pre_buffer = deque(maxlen=PRE_BUFFER_LEN)
         self.buffer = bytearray()
@@ -25,23 +36,23 @@ class ZeroLatencySink(voice_recv.AudioSink):
         self.start_time = 0
         self.user = None
         self.muted = False 
+        self.meta_mode = False 
         self.wake_word = "DM"
         self.last_sync = 0
         self.task = bot.loop.create_task(self.worker())
-        logger.info(">>> 🔌 SINK STARTED (v27.0: Phonetic Master)")
+        logger.info(f">>> 🔌 SINK STARTED [Target: {source_channel.name if source_channel else 'None'}]")
 
     def wants_opus(self): return False 
     def write(self, user, data):
         if data.pcm: self.queue.put_nowait((user, data.pcm))
     def cleanup(self): self.task.cancel()
     def toggle_mute(self): self.muted = not self.muted; return self.muted
+    def toggle_meta(self): self.meta_mode = not self.meta_mode; return self.meta_mode
 
     async def sync_wake_word(self):
         if time.time() - self.last_sync > 30:
             new_name = await brain.fetch_wake_word()
-            if new_name != self.wake_word:
-                logger.info(f"🔄 NAME UPDATE: '{self.wake_word}' -> '{new_name}'")
-                self.wake_word = new_name
+            if new_name != self.wake_word: self.wake_word = new_name
             self.last_sync = time.time()
 
     async def worker(self):
@@ -81,28 +92,85 @@ class ZeroLatencySink(voice_recv.AudioSink):
         wav_data = await convert_pcm_to_wav(self.buffer)
         if not wav_data: return
         text = await brain.transcribe_audio(wav_data)
+        
         if text:
-            curr = self.wake_word.lower()
             text_lower = text.lower()
-            aliases = [curr]
-            if curr == "dm": aliases.extend(["dan", "them", "damn", "dean", "the m", "d m"])
             
+            # VOICE PAINT
+            vision_match = re.match(r"^(vision|paint|draw)\s+(.*)", text_lower)
+            if vision_match:
+                prompt = vision_match.group(2).strip()
+                logger.info(f"🎨 MANUAL PAINT: {prompt}")
+                if prompt:
+                    filename, err = await brain.generate_image(prompt)
+                    if filename:
+                        await self.upload_image(filename, prompt, "Manual Request")
+                        await self.speak(f"Visualizing {prompt}")
+                    else: await self.speak("I could not generate that image.")
+                return
+
+            # CHAT
+            curr = self.wake_word.lower()
+            aliases = [curr, "oracle"]
+            if curr == "dm": aliases.extend(["dan", "them", "damn", "dean", "the m", "d m"])
+
             matched = None
             for alias in aliases:
                 if re.match(rf"^{re.escape(alias)}\b", text_lower): matched = alias; break
             
-            if not matched: 
-                logger.info(f"🔇 IGNORED: '{text}' (Waiting for '{curr}')")
-                return
-
+            if not matched: return
             clean = re.sub(rf"^{re.escape(matched)}\W*", '', text_lower).strip()
             if not clean: return
-            logger.info(f"🗣️ USER: {clean} (Heard: {matched})")
-            reply, voice_id = await brain.generate_response(clean, self.user.id, self.user.display_name)
+            
+            logger.info(f"🗣️ USER: {clean}")
+            
+            reply, voice_id, image_data = await brain.generate_response(clean, self.user.id, self.user.display_name, is_meta=self.meta_mode)
+            
+            # DIRECTOR UPLOAD
+            if image_data and self.source_channel:
+                await self.upload_image(image_data['filename'], image_data['prompt'], "Director Mode")
+            
             if reply: await self.speak(reply, voice_id)
 
+    async def upload_image(self, filename, prompt, footer):
+        if not self.source_channel: return
+        filepath = None
+        for root, dirs, files in os.walk(CAMPAIGN_ROOT):
+            if filename in files:
+                filepath = os.path.join(root, filename)
+                break
+        
+        if filepath and os.path.exists(filepath):
+            try:
+                file = discord.File(filepath, filename=filename)
+                embed = discord.Embed(title="🎨 Scene Visualization", description=f"*{prompt}*", color=0xf1c40f)
+                embed.set_image(url=f"attachment://{filename}")
+                embed.set_footer(text=f"RealmQuest Vision Engine // {footer}")
+                await self.source_channel.send(file=file, embed=embed)
+                logger.info(f"✅ UPLOADED: {filename}")
+            except Exception as e: logger.error(f"Upload Failed: {e}")
+        else: logger.error(f"❌ FILE NOT FOUND: {filename}")
+
     async def speak(self, text, voice_id=None):
-        payload = {"text": re.sub(r'\[.*?\]|\*.*?\*', '', text).strip()}
+        # CLEAN FOR TTS: Remove Markdown Tables, Headers, Bold/Italic
+        clean_text = text
+        # Remove Tables (Lines starting with |)
+        clean_text = re.sub(r'^\s*\|.*\|.*$', '', clean_text, flags=re.MULTILINE)
+        # Remove Table Dividers (|---|)
+        clean_text = re.sub(r'^\s*\|[-:]+\|.*$', '', clean_text, flags=re.MULTILINE)
+        # Remove Headers (###)
+        clean_text = re.sub(r'#+\s', '', clean_text)
+        # Remove Bold/Italic (** or *)
+        clean_text = re.sub(r'\*\*|__|\*', '', clean_text)
+        # Remove Links
+        clean_text = re.sub(r'\[.*?\]\(.*?\)', '', clean_text)
+        
+        clean_text = clean_text.strip()
+        if not clean_text: return # Nothing left to say
+
+        logger.info(f"🔊 SPEAKING ({len(clean_text)} chars): {clean_text[:50]}...")
+        
+        payload = {"text": clean_text}
         if voice_id: payload["voice_id"] = voice_id
         try:
             async with aiohttp.ClientSession() as session:
