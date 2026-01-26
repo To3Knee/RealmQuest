@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pymongo
+redis
+docker
+chromadb
+requests
+python-dotenv
+openai
+google-genai

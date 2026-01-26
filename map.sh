@@ -1,0 +1,1 @@
+find /opt/RealmQuest -maxdepth 4 -not -path '*/.*' -not -path '*/__pycache__*' -not -path '*/venv*' | sort > /opt/RealmQuest/structure_map.txt

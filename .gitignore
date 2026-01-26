@@ -1,13 +1,21 @@
-# Windows System Files
-Thumbs.db
-desktop.ini
-
-# Secrets (DO NOT PUSH THESE)
+# secrets
 .env
+
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# node/vite
+node_modules/
+dist/
+.vite/
+
+# logs
 *.log
 
-# Docker/Node/Python
-node_modules/
-__pycache__/
-.venv/
-foundry/data/
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

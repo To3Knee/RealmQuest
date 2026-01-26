@@ -1,30 +1,149 @@
+#===============================================================
+# Script Name: docker-compose.yml
+# Script Location: /opt/RealmQuest/docker-compose.yml
+# Date: 01/25/2026
+# Created By: T03KNEE
+# Github: https://github.com/To3Knee/RealmQuest
+# Version: 1.0.1
+# About: RealmQuest stack composition (Portal stability + VITE_API_URL behavior)
+#===============================================================
+
 version: '3.8'
 
 services:
-  architect-bot:
-    build: ./bot
+  # =========================================
+  # 1. THE DATA PILLAR (Persistence)
+  # =========================================
+  rq-mongo:
+    image: mongo:latest
+    container_name: realmquest-mongo
+    restart: unless-stopped
+    volumes:
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/database/mongo:/data/db
+    networks:
+      - realmquest_net
+
+  rq-redis:
+    image: redis:alpine
+    container_name: realmquest-redis
+    restart: unless-stopped
+    networks:
+      - realmquest_net
+
+  rq-chroma:
+    image: chromadb/chroma:latest
+    container_name: realmquest-chroma
+    restart: unless-stopped
+    ports:
+      - "8002:8000"
+    volumes:
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/database/chroma:/chroma/chroma
+    networks:
+      - realmquest_net
+
+  # =========================================
+  # 2. THE ENGINE PILLAR (Logic)
+  # =========================================
+  rq-api:
+    build: ./api
+    image: realmquest-rq-api
+    container_name: realmquest-api
+    restart: unless-stopped
     env_file: .env
+    environment:
+      MONGO_URL: mongodb://rq-mongo:27017
+      REDIS_URL: redis://rq-redis:6379/0
+      CHROMA_HOST: rq-chroma
+      CHROMA_PORT: 8000
+      CAMPAIGN_ROOT: /campaigns
+      DATA_ROOT: /data
+      RULES_ROOT: /rules
+      ENV_FILE_PATH: /config/.env
+
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app
+      - ./.env:/config/.env
+      - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/campaigns
+      - ${RQ_DATA:-/opt/RealmQuest-Data}:/data
+      - ./rules:/rules
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - rq-mongo
+      - rq-redis
+      - rq-chroma
+    networks:
+      - realmquest_net
+
+  rq-bot:
+    build: ./bot
+    image: realmquest-rq-bot
+    container_name: realmquest-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      API_URL: http://rq-api:8000
+      SCRIBE_URL: http://rq-scribe:9000
+      TORCH_HOME: /root/.cache/torch
+      CAMPAIGN_ROOT: /campaigns
+      DATA_ROOT: /data
+    depends_on:
+      - rq-api
+      - rq-redis
     volumes:
       - ./bot:/app
-      # ADD THIS LINE BELOW: Maps your local Windows folder to a folder inside Docker
-      - C:/GitHub/Collision-Stone-Campaign:/app/campaign
-    depends_on:
-      - portal-ui
+      - ./.env:/config/.env
+      - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/campaigns
+      - ${RQ_DATA:-/opt/RealmQuest-Data}:/data
+      - /opt/RealmQuest-Data/cache/torch:/root/.cache/torch
+    networks:
+      - realmquest_net
 
-  portal-ui:
+  # =========================================
+  # 3. THE INTERFACE PILLAR (Tools)
+  # =========================================
+  rq-kenku:
+    build: ./kenku
+    container_name: realmquest-kenku
+    restart: unless-stopped
+    environment:
+      - USER=root
+      - VNC_PASSWORD=realmquest123
+      - RESOLUTION=1280x720
+      - APP_ARGS="--disable-gpu --disable-software-rasterizer"
+    ports:
+      - "5901:5901"
+      - "3333:3333"
+    volumes:
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/kenku/home:/root
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/audio:/music
+    networks:
+      - realmquest_net
+
+  rq-scribe:
+    build: ./scribe
+    image: realmquest-rq-scribe
+    container_name: realmquest-scribe
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    networks:
+      - realmquest_net
+
+  rq-portal:
     build: ./portal
+    image: realmquest-rq-portal
+    container_name: realmquest-portal
+    restart: unless-stopped
+    environment:
+      API_PROXY_TARGET: http://rq-api:8000
+      VITE_API_URL: ""  # Leave blank to auto-resolve (fallback to portal host:8000). For reverse-proxy/TLS use: /api
     ports:
-      - "8501:8501"
-    env_file: .env
-    volumes:
-      - ./portal:/app
-      # ADD THIS LINE HERE TOO so the Portal can show character stats
-      - C:/GitHub/Collision-Stone-Campaign:/app/campaign
+      - "3000:3000"
+    networks:
+      - realmquest_net
 
-  foundry-vtt:
-    image: felddy/foundryvtt:latest
-    ports:
-      - "30000:30000"
-    volumes:
-      - ./foundry/data:/data
-    env_file: .env
+networks:
+  realmquest_net:
+    driver: bridge
