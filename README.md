@@ -1,7 +1,7 @@
 
 <div align="center">
 
-<img src="portal/assets/logo.png" alt="RealmQuest Logo" width="520" />
+<img src="portal/assets/logo.jpg" alt="RealmQuest Logo" width="520" />
 
 # RealmQuest
 
