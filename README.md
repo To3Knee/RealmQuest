@@ -1,9 +1,9 @@
 
 <div align="center">
 
-<img src="portal/src/assets/logo.jpg" alt="RealmQuest Logo" width="520" />
+<img src="portal/src/assets/logo.jpg" alt="Realm Quest" width="520" />
 
-# RealmQuest
+#
 
 A self-hosted, Docker-based **Discord AI DM** stack with a **Portal UI**, **API**, **Bot**, **Audio Matrix**, **Neural Config**, **Logs**, and campaign + data separation.
 
