@@ -1,14 +1,10 @@
 #===============================================================
 # Script Name: docker-compose.yml
 # Script Location: /opt/RealmQuest/docker-compose.yml
-# Date: 01/25/2026
-# Created By: T03KNEE
-# Github: https://github.com/To3Knee/RealmQuest
-# Version: 1.0.1
-# About: RealmQuest stack composition (Portal stability + VITE_API_URL behavior)
+# Date: 01/26/2026
+# Version: 18.24.0
+# About: Added Persistent Caching for AI Models (Fixes Slow Boot)
 #===============================================================
-
-version: '3.8'
 
 services:
   # =========================================
@@ -46,20 +42,15 @@ services:
   # =========================================
   rq-api:
     build: ./api
-    image: realmquest-rq-api
     container_name: realmquest-api
-    restart: unless-stopped
+    restart: always
     env_file: .env
     environment:
-      MONGO_URL: mongodb://rq-mongo:27017
-      REDIS_URL: redis://rq-redis:6379/0
-      CHROMA_HOST: rq-chroma
-      CHROMA_PORT: 8000
-      CAMPAIGN_ROOT: /campaigns
-      DATA_ROOT: /data
-      RULES_ROOT: /rules
-      ENV_FILE_PATH: /config/.env
-
+      - MONGO_URL=mongodb://realmquest-mongo:27017/
+      - REDIS_URL=redis://realmquest-redis:6379/0
+      - CHROMA_URL=http://realmquest-chroma:8000
+      - KENKU_URL=http://realmquest-kenku:3333
+      - ENV_FILE_PATH=/config/.env
     ports:
       - "8000:8000"
     volumes:
@@ -67,36 +58,29 @@ services:
       - ./.env:/config/.env
       - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/campaigns
       - ${RQ_DATA:-/opt/RealmQuest-Data}:/data
-      - ./rules:/rules
       - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      - rq-mongo
-      - rq-redis
-      - rq-chroma
+      # --- FIX: PERSISTENT MODEL CACHE ---
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/huggingface:/root/.cache/huggingface
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/chroma:/root/.cache/chroma
     networks:
       - realmquest_net
 
   rq-bot:
     build: ./bot
-    image: realmquest-rq-bot
     container_name: realmquest-bot
-    restart: unless-stopped
+    restart: always
     env_file: .env
     environment:
-      API_URL: http://rq-api:8000
-      SCRIBE_URL: http://rq-scribe:9000
-      TORCH_HOME: /root/.cache/torch
-      CAMPAIGN_ROOT: /campaigns
-      DATA_ROOT: /data
+      - API_URL=http://realmquest-api:8000
     depends_on:
       - rq-api
-      - rq-redis
     volumes:
       - ./bot:/app
       - ./.env:/config/.env
       - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/campaigns
       - ${RQ_DATA:-/opt/RealmQuest-Data}:/data
-      - /opt/RealmQuest-Data/cache/torch:/root/.cache/torch
+      # --- FIX: SHARED CACHE ---
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/huggingface:/root/.cache/huggingface
     networks:
       - realmquest_net
 
@@ -133,14 +117,15 @@ services:
 
   rq-portal:
     build: ./portal
-    image: realmquest-rq-portal
     container_name: realmquest-portal
     restart: unless-stopped
-    environment:
-      API_PROXY_TARGET: http://rq-api:8000
-      VITE_API_URL: ""  # Leave blank to auto-resolve (fallback to portal host:8000). For reverse-proxy/TLS use: /api
     ports:
-      - "3000:3000"
+      - "3000:5173"
+    volumes:
+      - ./portal:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
     networks:
       - realmquest_net
 

@@ -1,9 +1,8 @@
 # ===============================================================
 # Script Name: sink.py
 # Script Location: /opt/RealmQuest/bot/core/sink.py
-# Date: 2026-01-26
-# Version: 18.9.0
-# About: Sink with Markdown Stripper & Native Upload
+# Date: 2026-01-27
+# Version: 18.81.0 (Grand Lexicon & Write Buffer)
 # ===============================================================
 
 import asyncio
@@ -12,16 +11,35 @@ import logging
 import time
 import audioop
 import aiohttp
-import re
-import os
+import io
+import wave
 from collections import deque
 from discord.ext import voice_recv
-from core.audio import convert_pcm_to_wav
-from core import brain
-from core.config import RMS_THRESHOLD, SILENCE_TIMEOUT, MAX_RECORD_TIME, PRE_BUFFER_LEN, API_URL
+from core.config import RMS_THRESHOLD, SILENCE_TIMEOUT, MAX_RECORD_TIME, PRE_BUFFER_LEN, API_URL, SCRIBE_URL
 
 logger = logging.getLogger("sink")
-CAMPAIGN_ROOT = "/campaigns" 
+
+# THE GRAND LEXICON (Priming the AI Ear)
+WHISPER_CONTEXT = (
+    "RealmQuest, Dungeon Master, Player Character, NPC, Barmaid, Tavern, Innkeeper, Bartender, "
+    "Dungeons and Dragons, 5e, Critical Hit, Initiative, Armor Class, Saving Throw, Ability Check, "
+    "Advantage, Disadvantage, Proficiency, Inspiration, Spell Slot, Cantrip, Long Rest, Short Rest, "
+    "Hit Points, Temporary HP, Death Save, Exhaustion, Condition, Blinded, Charmed, Deafened, "
+    "Frightened, Grappled, Incapacitated, Invisible, Paralyzed, Petrified, Poisoned, Prone, "
+    "Restrained, Stunned, Unconscious, Abjuration, Conjuration, Divination, Enchantment, Evocation, "
+    "Illusion, Necromancy, Transmutation, Artificer, Barbarian, Bard, Cleric, Druid, Fighter, Monk, "
+    "Paladin, Ranger, Rogue, Sorcerer, Warlock, Wizard, Aarakocra, Dragonborn, Dwarf, Elf, Gnome, "
+    "Halfling, Human, Tiefling, Orc, Goblin, Kobold, Bugbear, Hobgoblin, Mind Flayer, Beholder, "
+    "Lich, Vampire, Zombie, Skeleton, Dragon, Giant, Elemental, Fey, Fiend, Celestial, Construct, "
+    "Aberration, Beast, Monstrosity, Ooze, Plant, Undead, Acid, Bludgeoning, Cold, Fire, Force, "
+    "Lightning, Necrotic, Piercing, Poison, Psychic, Radiant, Slashing, Thunder, Magic Missile, "
+    "Fireball, Cure Wounds, Healing Word, Shield, Mage Armor, Detect Magic, Identify, Counterspell, "
+    "Dispel Magic, Haste, Slow, Fly, Invisibility, Polymorph, Banishment, Teleport, Wish, "
+    "Bag of Holding, Potion of Healing, Scroll, Wand, Staff, Rod, Ring, Amulet, Cloak, Boots, "
+    "Sword, Shield, Dagger, Bow, Crossbow, Axe, Hammer, Mace, Spear, Staff, D20, D12, D10, D8, D6, D4, "
+    "Aboleth, Abyssal, Celestial, Deep Speech, Draconic, Druidic, Dwarvish, Elvish, Giant, Gnomish, "
+    "Goblin, Halfling, Infernal, Orc, Primordial, Sylvan, Undercommon, TPK, BBEG, AoE, DC, CR, XP"
+)
 
 class ZeroLatencySink(voice_recv.AudioSink):
     def __init__(self, bot, source_channel=None):
@@ -37,40 +55,38 @@ class ZeroLatencySink(voice_recv.AudioSink):
         self.user = None
         self.muted = False 
         self.meta_mode = False 
-        self.wake_word = "DM"
-        self.last_sync = 0
-        self.task = bot.loop.create_task(self.worker())
-        logger.info(f">>> 🔌 SINK STARTED [Target: {source_channel.name if source_channel else 'None'}]")
+        self.task = asyncio.create_task(self.worker())
+        logger.info(f"✅ Audio Sink Attached to {source_channel.name}")
 
     def wants_opus(self): return False 
+    
     def write(self, user, data):
-        if data.pcm: self.queue.put_nowait((user, data.pcm))
+        if self.muted: return
+        if data.pcm: 
+            self.queue.put_nowait((user, data.pcm))
+
     def cleanup(self): self.task.cancel()
     def toggle_mute(self): self.muted = not self.muted; return self.muted
     def toggle_meta(self): self.meta_mode = not self.meta_mode; return self.meta_mode
 
-    async def sync_wake_word(self):
-        if time.time() - self.last_sync > 30:
-            new_name = await brain.fetch_wake_word()
-            if new_name != self.wake_word: self.wake_word = new_name
-            self.last_sync = time.time()
-
     async def worker(self):
         while True:
             try:
-                await self.sync_wake_word()
-                try: user, pcm = await asyncio.wait_for(self.queue.get(), timeout=0.5)
+                try: 
+                    user, pcm = await asyncio.wait_for(self.queue.get(), timeout=0.5)
                 except asyncio.TimeoutError:
                     if self.speaking:
                         if not self.muted: await self.process_segment()
                         self.speaking = False
                         self.buffer = bytearray(); self.pre_buffer.clear()
                     continue
+                
                 if self.muted: continue 
-                if self.bot.voice_clients and self.bot.voice_clients[0].is_playing(): continue 
+                
                 try: rms = audioop.rms(pcm, 2)
                 except: rms = 0
                 is_loud = rms > RMS_THRESHOLD
+                
                 if not self.speaking:
                     self.pre_buffer.append(pcm)
                     if is_loud:
@@ -84,96 +100,90 @@ class ZeroLatencySink(voice_recv.AudioSink):
                     if (now - self.last_speech > SILENCE_TIMEOUT) or (now - self.start_time > MAX_RECORD_TIME):
                         await self.process_segment(); self.speaking = False; self.buffer = bytearray(); self.pre_buffer.clear()
             except asyncio.CancelledError: break
-            except Exception as e: logger.error(f"Worker Error: {e}")
+            except Exception: await asyncio.sleep(1)
 
     async def process_segment(self):
-        if self.muted: return
-        if len(self.buffer) / 192000.0 < 0.5: return
-        wav_data = await convert_pcm_to_wav(self.buffer)
-        if not wav_data: return
-        text = await brain.transcribe_audio(wav_data)
-        
-        if text:
-            text_lower = text.lower()
-            
-            # VOICE PAINT
-            vision_match = re.match(r"^(vision|paint|draw)\s+(.*)", text_lower)
-            if vision_match:
-                prompt = vision_match.group(2).strip()
-                logger.info(f"🎨 MANUAL PAINT: {prompt}")
-                if prompt:
-                    filename, err = await brain.generate_image(prompt)
-                    if filename:
-                        await self.upload_image(filename, prompt, "Manual Request")
-                        await self.speak(f"Visualizing {prompt}")
-                    else: await self.speak("I could not generate that image.")
-                return
+        if len(self.buffer) < 20000: return
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            wav_file.setnchannels(2); wav_file.setsampwidth(2); wav_file.setframerate(48000)
+            wav_file.writeframes(self.buffer)
+        wav_buffer.seek(0)
 
-            # CHAT
-            curr = self.wake_word.lower()
-            aliases = [curr, "oracle"]
-            if curr == "dm": aliases.extend(["dan", "them", "damn", "dean", "the m", "d m"])
-
-            matched = None
-            for alias in aliases:
-                if re.match(rf"^{re.escape(alias)}\b", text_lower): matched = alias; break
-            
-            if not matched: return
-            clean = re.sub(rf"^{re.escape(matched)}\W*", '', text_lower).strip()
-            if not clean: return
-            
-            logger.info(f"🗣️ USER: {clean}")
-            
-            reply, voice_id, image_data = await brain.generate_response(clean, self.user.id, self.user.display_name, is_meta=self.meta_mode)
-            
-            # DIRECTOR UPLOAD
-            if image_data and self.source_channel:
-                await self.upload_image(image_data['filename'], image_data['prompt'], "Director Mode")
-            
-            if reply: await self.speak(reply, voice_id)
-
-    async def upload_image(self, filename, prompt, footer):
-        if not self.source_channel: return
-        filepath = None
-        for root, dirs, files in os.walk(CAMPAIGN_ROOT):
-            if filename in files:
-                filepath = os.path.join(root, filename)
-                break
-        
-        if filepath and os.path.exists(filepath):
-            try:
-                file = discord.File(filepath, filename=filename)
-                embed = discord.Embed(title="🎨 Scene Visualization", description=f"*{prompt}*", color=0xf1c40f)
-                embed.set_image(url=f"attachment://{filename}")
-                embed.set_footer(text=f"RealmQuest Vision Engine // {footer}")
-                await self.source_channel.send(file=file, embed=embed)
-                logger.info(f"✅ UPLOADED: {filename}")
-            except Exception as e: logger.error(f"Upload Failed: {e}")
-        else: logger.error(f"❌ FILE NOT FOUND: {filename}")
-
-    async def speak(self, text, voice_id=None):
-        # CLEAN FOR TTS: Remove Markdown Tables, Headers, Bold/Italic
-        clean_text = text
-        # Remove Tables (Lines starting with |)
-        clean_text = re.sub(r'^\s*\|.*\|.*$', '', clean_text, flags=re.MULTILINE)
-        # Remove Table Dividers (|---|)
-        clean_text = re.sub(r'^\s*\|[-:]+\|.*$', '', clean_text, flags=re.MULTILINE)
-        # Remove Headers (###)
-        clean_text = re.sub(r'#+\s', '', clean_text)
-        # Remove Bold/Italic (** or *)
-        clean_text = re.sub(r'\*\*|__|\*', '', clean_text)
-        # Remove Links
-        clean_text = re.sub(r'\[.*?\]\(.*?\)', '', clean_text)
-        
-        clean_text = clean_text.strip()
-        if not clean_text: return # Nothing left to say
-
-        logger.info(f"🔊 SPEAKING ({len(clean_text)} chars): {clean_text[:50]}...")
-        
-        payload = {"text": clean_text}
-        if voice_id: payload["voice_id"] = voice_id
+        text = ""
         try:
             async with aiohttp.ClientSession() as session:
+                form = aiohttp.FormData()
+                form.add_field('file', wav_buffer, filename='speech.wav')
+                # INJECT DICTIONARY
+                form.add_field('prompt', WHISPER_CONTEXT) 
+                
+                async with session.post(f"{SCRIBE_URL}/transcribe", data=form) as resp:
+                    if resp.status == 200:
+                        res = await resp.json()
+                        text = res.get("text", "").strip()
+        except Exception: return
+        
+        if not text or len(text) < 3: return
+        logger.info(f"🗣️ HEARD: '{text}'")
+        
+        uid = str(self.user.id) if self.user else "000000"
+        uname = self.user.display_name if self.user else "Traveler"
+
+        try:
+            payload = {"message": text, "discord_id": uid, "player_name": uname, "is_meta": self.meta_mode}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{API_URL}/game/chat/generate", json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        reply = data.get("response")
+                        voice_id = data.get("voice_id")
+                        
+                        # Dynamic Campaign from API
+                        campaign = data.get("active_campaign", "default")
+                        
+                        pending_prompt = data.get("pending_image_prompt")
+                        if pending_prompt and self.source_channel:
+                             # Send Campaign Name to Image Handler
+                             asyncio.create_task(self.trigger_and_post_image(pending_prompt, campaign))
+
+                        if reply: await self.speak(reply, voice_id)
+        except Exception as e: logger.error(f"Brain Error: {e}")
+
+    async def trigger_and_post_image(self, prompt, campaign_name):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{API_URL}/game/imagine", json={"prompt": prompt}) as resp:
+                    if resp.status == 200:
+                        res = await resp.json()
+                        if res.get("status") == "success":
+                            # 3.0s Buffer to prevent 404
+                            await asyncio.sleep(3.0) 
+                            await self.post_image({"filename": res.get("filename"), "prompt": prompt}, campaign_name)
+        except Exception as e: logger.error(f"Auto-Art Fail: {e}")
+
+    async def post_image(self, img_data, campaign_name):
+        fname = img_data.get("filename")
+        if not fname: return
+        try:
+            # DYNAMIC URL: Uses active campaign name
+            file_url = f"{API_URL}/campaigns/{campaign_name}/assets/images/{fname}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file_url) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        f = discord.File(io.BytesIO(data), filename=fname)
+                        embed = discord.Embed(title="🎨 Visuals", description=img_data.get("prompt", "")[:200], color=0x9b59b6)
+                        embed.set_image(url=f"attachment://{fname}")
+                        await self.source_channel.send(file=f, embed=embed)
+                    else:
+                        logger.error(f"Image 404: {file_url}")
+        except Exception as e: logger.error(f"Image Post Fail: {e}")
+
+    async def speak(self, text, voice_id=None):
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {"text": text.strip(), "voice_id": voice_id}
                 async with session.post(f"{API_URL}/game/tts", json=payload) as resp:
                     if resp.status == 200:
                         data = await resp.read()
@@ -182,4 +192,4 @@ class ZeroLatencySink(voice_recv.AudioSink):
                             vc = self.bot.voice_clients[0]
                             if vc.is_playing(): vc.stop()
                             vc.play(discord.FFmpegPCMAudio("reply.mp3"))
-        except: pass
+        except Exception: pass

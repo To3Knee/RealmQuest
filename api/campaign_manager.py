@@ -1,12 +1,11 @@
 # -----------------------------------------------------------------------------
 # RealmQuest API - Campaign/System Manager Router
 # File: api/campaign_manager.py
-# Version: v18.2.6
-#
-# Router is included with prefix="/system" in main.py
+# Version: v18.64.0 (Deep Search JSON Extraction)
 # -----------------------------------------------------------------------------
 
 import os
+import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -17,411 +16,274 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from pymongo import MongoClient
 
+# SETUP LOGGING
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("api")
+
 router = APIRouter()
 
 # -----------------------------
-# Mongo
+# Mongo & Env Setup
 # -----------------------------
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://realmquest-mongo:27017/")
-
 try:
     mongo = MongoClient(MONGO_URL, serverSelectionTimeoutMS=2000)
     db = mongo["realmquest"]
-except Exception:
-    db = None
+except Exception: db = None
 
 # -----------------------------
-# Env path resolution
+# SEED DATA
 # -----------------------------
-def _resolve_env_path() -> str:
-    # Preferred: explicit ENV_FILE_PATH (docker-compose sets this)
-    candidates = [
-        os.getenv("ENV_FILE_PATH"),
-        os.getenv("REALMQUEST_ENV_PATH"),
-        "/config/.env",
-        "/opt/RealmQuest/.env",
-        "/app/.env",
-    ]
-    for c in candidates:
-        if not c:
-            continue
-        try:
-            p = Path(c)
-            # Only accept real files; bind-mounting a missing file can create a directory.
-            if p.exists() and p.is_file():
-                return c
-        except Exception:
-            # If Path() fails for any reason, just keep going
-            pass
-    # Fall back to the first non-empty candidate, otherwise a safe default
-    for c in candidates:
-        if c:
-            return c
-    return "/config/.env"
+DEFAULT_VOICES = [
+    {"id": "roger", "label": "Roger", "voice_id": "CwhRBWXzGAHq8TQ4Fs17"},
+    {"id": "sarah", "label": "Sarah", "voice_id": "EXAVITQu4vr4xnSDxMaL"},
+    {"id": "laura", "label": "Laura", "voice_id": "FGY2WhTYpPnrIDTdsKH5"},
+    {"id": "charlie", "label": "Charlie", "voice_id": "IKne3meq5aSn9XLyUdCD"},
+    {"id": "george", "label": "George", "voice_id": "JBFqnCBsd6RMkjVDRZzb"},
+    {"id": "callum", "label": "Callum", "voice_id": "N2lVS1w4EtoT3dr4eOWO"},
+    {"id": "river", "label": "River", "voice_id": "SAz9YHcvj6GT2YYXdXww"},
+    {"id": "harry", "label": "Harry", "voice_id": "SOYHLrjzK2X1ezoPC6cr"},
+    {"id": "liam", "label": "Liam", "voice_id": "TX3LPaxmHKxFdv7VOQHJ"},
+    {"id": "alice", "label": "Alice", "voice_id": "Xb7hH8MSUJpSbSDYk0k2"},
+    {"id": "matilda", "label": "Matilda", "voice_id": "XrExE9yKIg1WjnnlVkGX"},
+    {"id": "will", "label": "Will", "voice_id": "bIHbv24MWmeRgasZH58o"},
+    {"id": "jessica", "label": "Jessica", "voice_id": "cgSgspJ2msm6clMCkdW9"},
+    {"id": "eric", "label": "Eric", "voice_id": "cjVigY5qzO86Huf0OWal"},
+    {"id": "chris", "label": "Chris", "voice_id": "iP95p4xoKVk53GoZ742B"},
+    {"id": "brian", "label": "Brian", "voice_id": "nPczCjzI2devNBz1zQrb"},
+    {"id": "daniel", "label": "Daniel", "voice_id": "onwK4e9ZLuTAKqWW03F9"},
+    {"id": "lily", "label": "Lily", "voice_id": "pFZP5JQG7iQjIQuC4Bku"},
+    {"id": "adam", "label": "Adam", "voice_id": "pNInz6obpgDQGcFmaJgB"},
+    {"id": "bill", "label": "Bill", "voice_id": "pqHfZKP75CvOlQylNhV4"},
+    {"id": "rcbruh", "label": "RCBruh", "voice_id": "8y2HqT4TID923rG2Vc75"}
+]
 
-ENV_FILE_PATH = _resolve_env_path()
+DEFAULT_ARCHETYPE_MAP = {
+    "male": "roger", "female": "sarah", "child": "jessica", "wizard": "bill",
+    "old_man": "george", "old_woman": "matilda", "guard": "adam", "villain": "charlie",
+    "noble": "daniel", "merchant": "river", "thug": "callum", "monster": "harry", "spirit": "lily"
+}
 
-def _safe_key(k: str) -> str:
-    k = (k or "").strip()
-    # allow A-Z, 0-9, and underscore only
-    return "".join(ch for ch in k if ch.isalnum() or ch == "_")
+DEFAULT_SOUND_SEEDS = [
+    {"id": "sys_tavern", "name": "Ambience: Tavern Bustle"},
+    {"id": "sys_forest", "name": "Ambience: Forest Day"},
+    {"id": "sys_dungeon", "name": "Ambience: Dungeon Creepy"},
+    {"id": "sys_combat", "name": "Music: General Combat"},
+    {"id": "sys_boss", "name": "Music: Boss Battle"},
+    {"id": "sys_rain", "name": "Ambience: Heavy Rain"},
+    {"id": "sys_fire", "name": "SFX: Campfire Crackle"},
+    {"id": "sys_door", "name": "SFX: Door Creak"},
+    {"id": "sys_spell", "name": "SFX: Magic Spell"},
+    {"id": "sys_sword", "name": "SFX: Sword Clash"},
+    {"id": "sys_roar", "name": "SFX: Monster Roar"}
+]
 
-def _read_env() -> Dict[str, str]:
-    """Read env file into a dict. Returns {} if missing or unreadable."""
-    path = Path(ENV_FILE_PATH)
-    if (not path.exists()) or (not path.is_file()):
-        return {}
-    try:
-        data = dotenv_values(str(path)) or {}
-    except Exception:
-        return {}
-    out: Dict[str, str] = {}
-    for k, v in data.items():
-        if not k:
-            continue
-        out[str(k)] = "" if v is None else str(v)
-    return out
+FALLBACK_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"
 
-
+# Helper Functions
 def _ensure_env_file() -> Path:
-    """Ensure ENV_FILE_PATH exists as a regular file and its parent dir exists."""
-    p = Path(ENV_FILE_PATH)
+    p = Path("/config/.env")
     p.parent.mkdir(parents=True, exist_ok=True)
-    if p.exists() and not p.is_file():
-        raise HTTPException(status_code=500, detail=f"ENV path is not a file: {p}")
-    if not p.exists():
-        p.touch()
+    if not p.exists(): p.touch()
     return p
 
+def _read_env() -> Dict[str, str]:
+    if not Path("/config/.env").is_file(): return {}
+    try: return dotenv_values("/config/.env") or {}
+    except: return {}
 
 def _get_admin_pin() -> str:
-    # Prefer real process env; fall back to env file (allows updating pin without restart).
-    pin = os.getenv("ADMIN_PIN", "").strip()
-    if pin:
-        return pin
-    try:
-        return str(_read_env().get("ADMIN_PIN", "")).strip()
-    except Exception:
-        return ""
+    return os.getenv("ADMIN_PIN", "").strip() or str(_read_env().get("ADMIN_PIN", "")).strip()
 
-# -----------------------------
-# Audio config model
-# -----------------------------
 class AudioConfig(BaseModel):
     dmVoice: Optional[str] = ""
     dmName: str = "DM"
     archetypes: List[Dict[str, Any]] = []
     soundscapes: List[Dict[str, Any]] = []
+    voices: List[Dict[str, Any]] = []
 
 def _coerce_audio_registry(raw: Any) -> Dict[str, Any]:
-    # Normalize DB payload into a stable schema the UI expects
     reg = raw if isinstance(raw, dict) else {}
-    dm_name = str(reg.get("dmName") or "DM")
-    dm_voice = str(reg.get("dmVoice") or "")
-    archetypes = reg.get("archetypes") if isinstance(reg.get("archetypes"), list) else []
-    soundscapes = reg.get("soundscapes") if isinstance(reg.get("soundscapes"), list) else []
-
-    def norm_items(items, kind: str):
-        out = []
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            _id = str(it.get("id") or "").strip()
-            label = str(it.get("label") or "").strip()
-            if not _id:
-                continue
-            if not label:
-                label = _id.replace("_", " ").title()
-            if kind == "archetype":
-                out.append({"id": _id, "label": label, "voice_id": str(it.get("voice_id") or "")})
-            else:
-                out.append({"id": _id, "label": label, "track_id": str(it.get("track_id") or "")})
-        return out
-
+    def norm_list(items):
+        if not isinstance(items, list): return []
+        return [i for i in items if isinstance(i, dict)]
     return {
         "config_id": "audio_registry",
-        "dmName": dm_name,
-        "dmVoice": dm_voice,
-        "archetypes": norm_items(archetypes, "archetype"),
-        "soundscapes": norm_items(soundscapes, "soundscape"),
+        "dmName": str(reg.get("dmName") or "DM"),
+        "dmVoice": str(reg.get("dmVoice") or FALLBACK_VOICE_ID),
+        "archetypes": norm_list(reg.get("archetypes")),
+        "soundscapes": norm_list(reg.get("soundscapes")),
+        "voices": norm_list(reg.get("voices"))
     }
 
-# -----------------------------
-# System config endpoints
-# -----------------------------
+def repair_audio_config():
+    if db is None: return
+    try:
+        conf = db["system_config"].find_one({"config_id": "audio_registry"})
+        if not conf:
+            payload = {
+                "config_id": "audio_registry",
+                "dmVoice": FALLBACK_VOICE_ID,
+                "dmName": "DM",
+                "voices": DEFAULT_VOICES,
+                "archetypes": [{"role": k, "voice_label": v, "voice_id": ""} for k, v in DEFAULT_ARCHETYPE_MAP.items()],
+                "soundscapes": []
+            }
+            db["system_config"].update_one({"config_id": "audio_registry"}, {"$set": payload}, upsert=True)
+            return
+
+        existing_roles = {a.get("role") for a in conf.get("archetypes", [])}
+        new_entries = []
+        for role, v_label in DEFAULT_ARCHETYPE_MAP.items():
+            if role not in existing_roles:
+                new_entries.append({"role": role, "voice_label": v_label, "voice_id": ""})
+        if new_entries:
+            db["system_config"].update_one({"config_id": "audio_registry"}, {"$push": {"archetypes": {"$each": new_entries}}})
+    except Exception: pass
+
 @router.get("/config")
 def get_system_config():
-    config: Dict[str, Any] = {
+    repair_audio_config()
+    config = {
         "active_campaign": "the_collision_stone",
         "llm_provider": os.getenv("AI_PROVIDER", "Gemini-Flash"),
         "art_style": "Cinematic Fantasy",
-        "audio_registry": _coerce_audio_registry({}),
+        "audio_registry": _coerce_audio_registry({})
     }
-
     if db is not None:
-        audio_conf = db["system_config"].find_one({"config_id": "audio_registry"}, {"_id": 0})
-        if audio_conf:
-            config["audio_registry"] = _coerce_audio_registry(audio_conf)
-
+        try:
+            audio_conf = db["system_config"].find_one({"config_id": "audio_registry"}, {"_id": 0})
+            if audio_conf: config["audio_registry"] = _coerce_audio_registry(audio_conf)
+        except: pass
     return config
 
 @router.post("/audio/save")
 def save_audio_config(payload: AudioConfig):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Mongo unavailable")
-    data = _coerce_audio_registry(payload.dict())
-    db["system_config"].update_one(
-        {"config_id": "audio_registry"},
-        {"$set": data},
-        upsert=True,
-    )
-    return {"ok": True, "saved": True, "audio_registry": data}
-
-# -----------------------------
-# Auth (PIN lock)
-# -----------------------------
-ADMIN_PIN = str(os.getenv("ADMIN_PIN", "")).strip()
-AUTH_LOCKED = False
+    if db is None: raise HTTPException(status_code=500, detail="Mongo unavailable")
+    try:
+        data = _coerce_audio_registry(payload.dict())
+        db["system_config"].update_one({"config_id": "audio_registry"}, {"$set": data}, upsert=True)
+        return {"ok": True, "saved": True, "audio_registry": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB Write Error: {e}")
 
 @router.get("/auth/status")
-def auth_status():
-    return {"locked": AUTH_LOCKED, "has_pin": bool(_get_admin_pin())}
-
-@router.post("/auth/lock")
-def auth_lock():
-    global AUTH_LOCKED
-    if _get_admin_pin():
-        AUTH_LOCKED = True
-    return {"ok": True, "locked": AUTH_LOCKED, "has_pin": bool(_get_admin_pin())}
-
-@router.post("/auth/unlock")
-def auth_unlock(payload: dict):
-    global AUTH_LOCKED
-    admin_pin = _get_admin_pin()
-    if not admin_pin:
-        AUTH_LOCKED = False
-        return {"ok": True, "locked": False, "has_pin": False}
-    pin = str((payload or {}).get("pin", "")).strip()
-    if pin == admin_pin:
-        AUTH_LOCKED = False
-        return {"ok": True, "locked": False, "has_pin": True}
-    raise HTTPException(status_code=401, detail="Invalid PIN")
-
-# -----------------------------
-# Env endpoints (Neural Config)
-# -----------------------------
-@router.get("/env/path")
-def env_path():
-    p = Path(ENV_FILE_PATH)
-    return {"path": ENV_FILE_PATH, "exists": p.exists(), "size": p.stat().st_size if p.exists() else 0}
+def auth_status(): return {"locked": False, "has_pin": bool(_get_admin_pin())}
 
 @router.get("/env/all")
-def env_all():
-    data = _read_env()
-    return [{"key": k, "value": v} for k, v in sorted(data.items(), key=lambda kv: kv[0].lower())]
-
-@router.get("/env/{key}")
-def env_get(key: str):
-    data = _read_env()
-    k = _safe_key(key)
-    if not k:
-        raise HTTPException(status_code=400, detail="Bad key")
-    return {"key": k, "value": data.get(k, "")}
+def env_all(): return [{"key": k, "value": v} for k, v in sorted(_read_env().items())]
 
 @router.post("/env")
 def env_set(payload: dict):
-    # supports either {"key": "...", "value": "..."} or bulk {"K1":"V1","K2":"V2"}
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Bad payload")
+    p = Path("/config/.env")
+    if not p.exists(): p.touch()
+    key, val = str(payload.get("key", "")).strip(), str(payload.get("value", "")).strip()
+    if not key: raise HTTPException(400, "Missing key")
+    if not val: unset_key(p, key); return {"deleted": key}
+    set_key(p, key, val); return {"set": key, "val": val}
 
-    # Ensure the env file exists before attempting any writes.
-    _ensure_env_file()
-
-    if "key" in payload:
-        key = _safe_key(str(payload.get("key", "")))
-        val = "" if payload.get("value") is None else str(payload.get("value")).strip()
-        if not key:
-            raise HTTPException(status_code=400, detail="Missing key")
-        if val == "":
-            unset_key(ENV_FILE_PATH, key)
-            return {"ok": True, "key": key, "deleted": True}
-        set_key(ENV_FILE_PATH, key, val)
-        return {"ok": True, "key": key, "value": val}
-
-    changed = []
-    for k, v in payload.items():
-        key = _safe_key(str(k))
-        if not key:
-            continue
-        val = "" if v is None else str(v).strip()
-        if val == "":
-            unset_key(ENV_FILE_PATH, key)
-            changed.append({"key": key, "deleted": True})
-        else:
-            set_key(ENV_FILE_PATH, key, val)
-            changed.append({"key": key, "value": val})
-    return {"ok": True, "changed": changed}
-
-# -----------------------------
-# Audio sources
-# -----------------------------
 ELEVEN_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
-
 @router.get("/audio/voices")
 def list_voices():
-    if not ELEVEN_API_KEY:
-        return []
+    if not ELEVEN_API_KEY: return []
     try:
-        r = requests.get(
-            "https://api.elevenlabs.io/v1/voices",
-            headers={"xi-api-key": ELEVEN_API_KEY},
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json() or {}
-        voices = data.get("voices") or []
-        out = []
-        for v in voices:
-            if not isinstance(v, dict):
-                continue
-            out.append({"id": v.get("voice_id", ""), "name": v.get("name", "")})
-        return out
-    except Exception:
-        return []
+        r = requests.get("https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": ELEVEN_API_KEY}, timeout=5)
+        return [{"id": v["voice_id"], "name": v["name"]} for v in r.json().get("voices", [])]
+    except: return []
+
+# -----------------------------
+# KENKU BRIDGE (Deep Search)
+# -----------------------------
+KENKU_URL = os.getenv("KENKU_URL", "http://realmquest-kenku:3333").rstrip("/")
 
 def _docker_client():
-    try:
-        return docker.DockerClient(base_url="unix:///var/run/docker.sock")
-    except Exception:
-        return None
+    try: return docker.DockerClient(base_url="unix:///var/run/docker.sock")
+    except: return None
 
-KENKU_CONTAINER = os.getenv("KENKU_CONTAINER", "realmquest-kenku")
-
-def _scan_kenku_tracks_via_docker(limit: int = 300) -> List[Dict[str, str]]:
-    cli = _docker_client()
-    if cli is None:
-        return []
-    try:
-        c = cli.containers.get(KENKU_CONTAINER)
-    except Exception:
-        return []
-
-    # Candidates are intentionally broad; we stop on first directory that yields results.
-    scan_dirs = [
-        "/root",
-        "/root/Music",
-        "/root/media",
-        "/root/kenku",
-        "/root/.local/share",
-        "/data",
-        "/app",
-    ]
-
-    exts = r"-iname '*.mp3' -o -iname '*.wav' -o -iname '*.ogg' -o -iname '*.m4a' -o -iname '*.flac' -o -iname '*.aac'"
-    for d in scan_dirs:
-        cmd = (
-            "sh -lc "
-            + repr(
-                f"if [ -d {d} ]; then "
-                f"find {d} -type f \\( {exts} \\) 2>/dev/null | sed -n '1,{limit}p'; "
-                f"fi"
-            )
-        )
-        try:
-            rc, out = c.exec_run(cmd)
-            if rc != 0:
-                continue
-            paths = [p.strip() for p in (out.decode("utf-8", "ignore") if isinstance(out, (bytes, bytearray)) else str(out)).splitlines() if p.strip()]
-            if not paths:
-                continue
-
-            def label_for(p: str) -> str:
-                # show last two path components when possible
-                parts = [x for x in p.split("/") if x]
-                if len(parts) >= 2:
-                    return f"{parts[-2]}/{parts[-1]}"
-                return parts[-1] if parts else p
-
-            return [{"id": p, "name": label_for(p)} for p in paths]
-        except Exception:
-            continue
-    return []
+# HELPER: RECURSIVE TRACK FINDER
+def _extract_tracks_recursive(data: Any, tracks: List[Dict[str, str]]):
+    """
+    Crawls arbitrary JSON to find objects that look like audio tracks.
+    A 'Track' is defined as a dict with an 'id' and either 'url' or 'title'.
+    """
+    if isinstance(data, dict):
+        # Is this a track?
+        if "id" in data and ("url" in data or "title" in data):
+            # It's a track!
+            title = data.get("title") or data.get("url") or data.get("id") or "Unknown"
+            
+            # Special case for Playlist Items: they might have a nested 'track' object
+            if "track" in data and isinstance(data["track"], dict):
+                title = data["track"].get("title") or title
+                
+            tracks.append({
+                "id": data["id"],
+                "name": f"[File] {title}",
+                "source": "kenku_scan"
+            })
+        
+        # Recurse values
+        for key, value in data.items():
+            _extract_tracks_recursive(value, tracks)
+            
+    elif isinstance(data, list):
+        # Recurse items
+        for item in data:
+            _extract_tracks_recursive(item, tracks)
 
 @router.get("/audio/kenku/tracks")
 def list_kenku_tracks():
-    # Prefer kenku's own HTTP API if present; otherwise scan container filesystem.
-    base = os.getenv("KENKU_URL", "http://realmquest-kenku:3333").rstrip("/")
-    candidates = ["/api/tracks", "/tracks", "/api/library/tracks", "/api/library", "/v1/tracks"]
+    real_tracks = []
+    
+    logger.info(f"🎵 KENKU: Connecting to {KENKU_URL}...")
+    
+    # 1. FETCH EVERYTHING
+    try:
+        # Try Playlist Endpoint
+        r_pl = requests.get(f"{KENKU_URL}/v1/playlist", timeout=3)
+        if r_pl.status_code == 200:
+            _extract_tracks_recursive(r_pl.json(), real_tracks)
+            
+        # Try Soundboard Endpoint
+        r_sb = requests.get(f"{KENKU_URL}/v1/soundboard", timeout=3)
+        if r_sb.status_code == 200:
+            _extract_tracks_recursive(r_sb.json(), real_tracks)
+            
+        # Remove duplicates based on ID
+        unique_tracks = {t['id']: t for t in real_tracks}.values()
+        real_tracks = list(unique_tracks)
+        
+        logger.info(f"✅ KENKU: Deep Scan found {len(real_tracks)} real tracks.")
+        
+    except Exception as e:
+        logger.error(f"❌ KENKU SCAN FAIL: {e}")
 
-    for path in candidates:
-        try:
-            r = requests.get(base + path, timeout=3)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            # tolerate various shapes
-            if isinstance(data, list):
-                tracks = data
-            elif isinstance(data, dict):
-                tracks = data.get("tracks") or data.get("data") or []
-            else:
-                tracks = []
-            out = []
-            for t in tracks:
-                if isinstance(t, dict):
-                    tid = t.get("id") or t.get("track_id") or t.get("path") or t.get("url")
-                    name = t.get("name") or t.get("title") or t.get("filename") or tid
-                    if tid:
-                        out.append({"id": str(tid), "name": str(name)})
-                elif isinstance(t, str):
-                    out.append({"id": t, "name": t})
-            if out:
-                return out
-        except Exception:
-            pass
+    # 2. ADD PHANTOM TRACKS (System Defaults)
+    phantom_tracks = []
+    for seed in DEFAULT_SOUND_SEEDS:
+        phantom_tracks.append({
+            "id": seed["id"],
+            "name": f"✨ {seed['name']} (System Default)",
+            "source": "system_phantom"
+        })
 
-    return _scan_kenku_tracks_via_docker()
-
-# -----------------------------
-# Docker control endpoints
-# -----------------------------
-SERVICE_TO_CONTAINER = {
-    "rq-bot": "realmquest-bot",
-    "rq-api": "realmquest-api",
-    "rq-portal": "realmquest-portal",
-    "rq-scribe": "realmquest-scribe",
-    "rq-kenku": "realmquest-kenku",
-    "rq-mongo": "realmquest-mongo",
-    "rq-redis": "realmquest-redis",
-    "rq-chroma": "realmquest-chroma",
-}
+    # Combine
+    final_list = real_tracks + phantom_tracks
+    logger.info(f"📦 RETURNING TOTAL: {len(final_list)} (Real: {len(real_tracks)} / Ghost: {len(phantom_tracks)})")
+    return final_list
 
 @router.get("/control/logs/{service}")
 def control_logs(service: str):
-    name = SERVICE_TO_CONTAINER.get(service, service)
     cli = _docker_client()
-    if cli is None:
-        raise HTTPException(status_code=500, detail="Docker unavailable")
-    try:
-        c = cli.containers.get(name)
-        txt = c.logs(tail=400).decode("utf-8", "ignore")
-        return txt
-    except docker.errors.NotFound:
-        raise HTTPException(status_code=404, detail=f"Container not found: {name}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if not cli: return "Docker Error"
+    try: return cli.containers.get(service if "realmquest" in service else f"realmquest-{service.replace('rq-', '')}").logs(tail=400).decode("utf-8", "ignore")
+    except Exception as e: return str(e)
 
 @router.post("/control/restart/{service}")
 def control_restart(service: str):
-    name = SERVICE_TO_CONTAINER.get(service, service)
     cli = _docker_client()
-    if cli is None:
-        raise HTTPException(status_code=500, detail="Docker unavailable")
+    if not cli: return {"ok": False}
     try:
-        c = cli.containers.get(name)
-        c.restart()
-        return {"ok": True, "service": service, "container": name}
-    except docker.errors.NotFound:
-        raise HTTPException(status_code=404, detail=f"Container not found: {name}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        cli.containers.get(service if "realmquest" in service else f"realmquest-{service.replace('rq-', '')}").restart()
+        return {"ok": True}
+    except: return {"ok": False}

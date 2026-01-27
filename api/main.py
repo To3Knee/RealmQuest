@@ -1,12 +1,19 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from campaign_manager import router as system_router
-from chat_engine import router as game_router
+# ===============================================================
+# Script Name: main.py
+# Script Location: /opt/RealmQuest/api/main.py
+# Date: 2026-01-27
+# Version: 18.81.0 (Path Safety)
+# ===============================================================
+
 import os
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from chat_engine import router as chat_router
+from campaign_manager import router as system_router
 
 app = FastAPI()
 
-# Enable CORS for the Portal
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,10 +22,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Routes
+# INIT PATHS (Defaults to collision stone to match your DB)
+# In a perfect world we read DB here too, but hardcoding the mkdir is safe
+active_campaign = "the_collision_stone"
+os.makedirs(f"/campaigns/{active_campaign}/assets/images", exist_ok=True)
+os.makedirs(f"/campaigns/{active_campaign}/codex/npcs", exist_ok=True)
+
+# Mount the ENTIRE campaigns folder
+app.mount("/campaigns", StaticFiles(directory="/campaigns"))
+
+app.include_router(chat_router, prefix="/game")
 app.include_router(system_router, prefix="/system")
-app.include_router(game_router, prefix="/game")
 
 @app.get("/")
-def root():
-    return {"status": "RealmQuest API Online", "version": "v28.0"}
+def health_check():
+    return {"status": "active", "service": "RealmQuest API"}

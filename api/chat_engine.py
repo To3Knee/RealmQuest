@@ -1,9 +1,8 @@
 # ===============================================================
 # Script Name: chat_engine.py
 # Script Location: /opt/RealmQuest/api/chat_engine.py
-# Date: 2026-01-26
-# Version: 18.14.0
-# About: Ambient Sound (Kenku) & Auto-NPC Creation (The Codex)
+# Date: 2026-01-27
+# Version: 18.82.0 (Asynchronous Flow)
 # ===============================================================
 
 import os
@@ -12,7 +11,7 @@ import redis
 import re
 import requests
 import time
-from fastapi import APIRouter, Response, HTTPException, Body
+from fastapi import APIRouter, Response, BackgroundTasks
 from pydantic import BaseModel
 from pymongo import MongoClient
 
@@ -31,12 +30,25 @@ except: ai = None; ai_available = False
 try: r_client = redis.from_url(os.getenv("REDIS_URL", "redis://realmquest-redis:6379/0"), decode_responses=True)
 except: r_client = None
 
-# --- MODELS ---
+# --- CONFIG ---
+KENKU_URL = os.getenv("KENKU_URL", "http://realmquest-kenku:3333").rstrip("/")
+FALLBACK_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"
+
+# --- RUNTIME MEMORY ---
+VOICE_DB = {}      
+ARCHETYPE_DB = {}  
+DM_VOICE_ID = ""
+LAST_DB_SYNC = 0
+
 class ChatRequest(BaseModel):
     message: str
     discord_id: str
     player_name: str
     is_meta: bool = False
+
+class TTSRequest(BaseModel):
+    text: str
+    voice_id: str
 
 class ImageRequest(BaseModel):
     prompt: str
@@ -44,311 +56,247 @@ class ImageRequest(BaseModel):
 class PromptUpdate(BaseModel):
     prompt: str
 
-class TTSRequest(BaseModel):
-    text: str
-    voice_id: str
-
 CHAT_HISTORY = [] 
-SYSTEM_PROMPT_OVERRIDE = ""
-FALLBACK_VOICE_ID = "21m00Tcm4TlvDq8ikWAM" # Rachel
+# REMOVED: SYSTEM_PROMPT_OVERRIDE global to prevent leakage
 
-# --- AUDIO MATRIX: SOUNDSCAPES (Kenku FM) ---
-# Map simple keywords to Kenku Track IDs (UUIDs)
-# In production, these would come from the Portal Config
-SOUND_CONSTANTS = {
-    "tavern": "track_tavern_uuid_123",
-    "rain": "track_rain_uuid_456",
-    "storm": "track_storm_uuid_789",
-    "forest": "track_forest_uuid_101",
-    "dungeon": "track_dungeon_uuid_112",
-    "combat": "track_combat_uuid_131",
-    "battle": "track_combat_uuid_131",
-    "wind": "track_wind_uuid_415",
-    "fire": "track_fire_uuid_161",
-    "camp": "track_fire_uuid_161"
-}
+# --- HELPERS ---
 
-# --- VOICE ROSTER (Smart Casting) ---
-VOICE_ROSTER = [
-    {"name": "Roger", "id": "CwhRBWXzGAHq8TQ4Fs17", "gender": "male", "tags": ["laid-back", "casual"]},
-    {"name": "Sarah", "id": "EXAVITQu4vr4xnSDxMaL", "gender": "female", "tags": ["mature", "confident"]},
-    {"name": "Laura", "id": "FGY2WhTYpPnrIDTdsKH5", "gender": "female", "tags": ["quirky", "enthusiast"]},
-    {"name": "Charlie", "id": "IKne3meq5aSn9XLyUdCD", "gender": "male", "tags": ["deep", "confident"]},
-    {"name": "George", "id": "JBFqnCBsd6RMkjVDRZzb", "gender": "male", "tags": ["warm", "storyteller"]},
-    {"name": "Callum", "id": "N2lVS1w4EtoT3dr4eOWO", "gender": "male", "tags": ["husky", "trickster"]},
-    {"name": "River", "id": "SAz9YHcvj6GT2YYXdXww", "gender": "neutral", "tags": ["relaxed", "neutral"]},
-    {"name": "Harry", "id": "SOYHLrjzK2X1ezoPC6cr", "gender": "male", "tags": ["fierce", "warrior"]},
-    {"name": "Liam", "id": "TX3LPaxmHKxFdv7VOQHJ", "gender": "male", "tags": ["energetic"]},
-    {"name": "Alice", "id": "Xb7hH8MSUJpSbSDYk0k2", "gender": "female", "tags": ["clear", "educator"]},
-    {"name": "Matilda", "id": "XrExE9yKIg1WjnnlVkGX", "gender": "female", "tags": ["knowledgeable", "professional"]},
-    {"name": "Will", "id": "bIHbv24MWmeRgasZH58o", "gender": "male", "tags": ["relaxed", "optimist"]},
-    {"name": "Jessica", "id": "cgSgspJ2msm6clMCkdW9", "gender": "female", "tags": ["playful", "warm"]},
-    {"name": "Eric", "id": "cjVigY5qzO86Huf0OWal", "gender": "male", "tags": ["smooth", "trustworthy"]},
-    {"name": "Chris", "id": "iP95p4xoKVk53GoZ742B", "gender": "male", "tags": ["charming"]},
-    {"name": "Brian", "id": "nPczCjzI2devNBz1zQrb", "gender": "male", "tags": ["deep", "comforting"]},
-    {"name": "Daniel", "id": "onwK4e9ZLuTAKqWW03F9", "gender": "male", "tags": ["steady"]},
-    {"name": "Lily", "id": "pFZP5JQG7iQjIQuC4Bku", "gender": "female", "tags": ["velvety", "actress"]},
-    {"name": "Adam", "id": "pNInz6obpgDQGcFmaJgB", "gender": "male", "tags": ["dominant", "firm"]},
-    {"name": "Bill", "id": "pqHfZKP75CvOlQylNhV4", "gender": "male", "tags": ["wise", "mature"]}
-]
-
-# --- SMART CASTING LOGIC ---
-def smart_cast(role_name):
-    role = role_name.lower()
-    gender = "male" 
-    female_triggers = ["queen", "maid", "lady", "witch", "girl", "woman", "mother", "sister", "princess", "actress", "waitress", "matron", "crone", "goddess", "barmaid"]
-    if any(x in role for x in female_triggers): gender = "female"
-    
-    if gender == "female":
-        if "maid" in role or "waitress" in role: return "cgSgspJ2msm6clMCkdW9" # Jessica
-        if "queen" in role or "noble" in role: return "pFZP5JQG7iQjIQuC4Bku" # Lily
-        if "witch" in role or "hag" in role: return "FGY2WhTYpPnrIDTdsKH5" # Laura
-        if "guard" in role or "warrior" in role: return "EXAVITQu4vr4xnSDxMaL" # Sarah
-        return "EXAVITQu4vr4xnSDxMaL" # Sarah (Default)
-
-    # Male/Neutral
-    if "king" in role or "lord" in role: return "pNInz6obpgDQGcFmaJgB" # Adam
-    if "guard" in role or "soldier" in role or "orc" in role: return "SOYHLrjzK2X1ezoPC6cr" # Harry
-    if "wizard" in role or "priest" in role: return "pqHfZKP75CvOlQylNhV4" # Bill
-    if "goblin" in role or "thief" in role: return "N2lVS1w4EtoT3dr4eOWO" # Callum
-    if "inn" in role or "keep" in role or "bartender" in role: return "JBFqnCBsd6RMkjVDRZzb" # George
-    if "villain" in role or "demon" in role: return "IKne3meq5aSn9XLyUdCD" # Charlie
-    
-    return "pNInz6obpgDQGcFmaJgB" # Adam (Default)
-
-# --- VOICE CACHE ---
-VOICE_CACHE = {}
-LAST_VOICE_FETCH = 0
-
-def refresh_elevenlabs_voices():
-    global VOICE_CACHE, LAST_VOICE_FETCH
-    key = os.getenv("ELEVENLABS_API_KEY")
-    if not key: return
-    if time.time() - LAST_VOICE_FETCH < 600 and VOICE_CACHE: return
+def get_active_campaign_name():
+    if db is None: return "default"
     try:
-        r = requests.get("https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": key}, timeout=5)
-        if r.status_code == 200:
-            VOICE_CACHE = {v["name"].lower(): v["voice_id"] for v in r.json().get("voices", [])}
-            LAST_VOICE_FETCH = time.time()
-            print(f"✅ VOICE CACHE: Loaded {len(VOICE_CACHE)} voices.")
+        conf = db["system_config"].find_one({"config_id": "audio_registry"})
+        if conf and "active_campaign" in conf: return conf["active_campaign"]
     except: pass
+    return "default"
 
-# --- HELPER: SAVE NPC NOTE ---
-def save_npc_codex(npc_data, image_file, voice_id, campaign_path):
-    """Writes a JSON dossier for the new NPC"""
-    try:
-        # Ensure directory exists: /campaigns/default/codex/npcs/
-        codex_dir = os.path.join(campaign_path, "codex", "npcs")
-        os.makedirs(codex_dir, exist_ok=True)
-        
-        # Clean filename
-        safe_name = re.sub(r'[^a-zA-Z0-9]', '_', npc_data.get("name", "Unknown")).lower()
-        file_path = os.path.join(codex_dir, f"{safe_name}.json")
-        
-        # Enrich Data
-        npc_data["voice_id"] = voice_id
-        npc_data["image"] = f"assets/images/{image_file}" if image_file else None
-        npc_data["created_at"] = time.time()
-        
-        with open(file_path, "w") as f:
-            json.dump(npc_data, f, indent=2)
-            
-        print(f"📜 CODEX UPDATED: Saved {safe_name}.json")
-    except Exception as e:
-        print(f"❌ CODEX ERROR: {e}")
-
-# --- HELPER: TRIGGER KENKU ---
-def trigger_sound(tag):
-    """Sends command to Kenku Bridge (Mock for now, ready for implementation)"""
-    track_id = SOUND_CONSTANTS.get(tag.lower())
-    if track_id:
-        print(f"🎵 KENKU PLAY: {tag} ({track_id})")
-        # requests.post("http://rq-kenku:3333/play", json={"id": track_id}) 
-    else:
-        print(f"⚠️ KENKU: Sound '{tag}' not found in constants.")
-
-# --- ENDPOINTS ---
-
-@router.get("/brain/status")
-def get_brain_status():
+def get_campaign_paths():
+    campaign_name = get_active_campaign_name()
+    base = f"/campaigns/{campaign_name}"
     return {
-        "history": CHAT_HISTORY[-10:],
-        "system_prompt": SYSTEM_PROMPT_OVERRIDE or "Default DM Protocol",
-        "stats": {"tokens": sum(len(m['content']) for m in CHAT_HISTORY) // 4, "turns": len(CHAT_HISTORY)}
+        "name": campaign_name,
+        "root": base,
+        "images": os.path.join(base, "assets", "images"),
+        "npcs": os.path.join(base, "codex", "npcs")
     }
 
-@router.post("/brain/wipe")
-def wipe_memory():
-    global CHAT_HISTORY
-    CHAT_HISTORY = []
-    return {"status": "wiped"}
+def sync_voices_from_db():
+    global VOICE_DB, ARCHETYPE_DB, DM_VOICE_ID, LAST_DB_SYNC
+    if db is None: return
+    if time.time() - LAST_DB_SYNC < 10: return
 
-@router.post("/brain/prompt")
-def update_prompt(payload: PromptUpdate):
-    global SYSTEM_PROMPT_OVERRIDE
-    SYSTEM_PROMPT_OVERRIDE = payload.prompt
-    return {"status": "updated"}
+    try:
+        config = db["system_config"].find_one({"config_id": "audio_registry"})
+        if config:
+            raw_voices = config.get("voices", [])
+            for v in raw_voices:
+                VOICE_DB[v["label"].lower()] = v["voice_id"]
+
+            raw_archetypes = config.get("archetypes", [])
+            for arc in raw_archetypes:
+                role = arc.get("role", "").lower()
+                target_label = arc.get("voice_label", "").lower()
+                if target_label in VOICE_DB:
+                    ARCHETYPE_DB[role] = VOICE_DB[target_label]
+            
+            if config.get("dmVoice"): DM_VOICE_ID = config.get("dmVoice")
+        LAST_DB_SYNC = time.time()
+    except Exception: pass
+
+def get_voice_for_role(actor_tag, audio_registry):
+    tag = actor_tag.lower()
+    if tag.strip() in ARCHETYPE_DB: return ARCHETYPE_DB[tag.strip()]
+    for name, vid in VOICE_DB.items():
+        if tag in name: return vid
+    
+    # Heuristics
+    if any(x in tag for x in ["maid", "woman", "lady", "girl", "queen", "mother"]):
+        return ARCHETYPE_DB.get("female") or ARCHETYPE_DB.get("old_woman")
+    if any(x in tag for x in ["man", "boy", "king", "prince", "lord", "sir", "bartender"]):
+        return ARCHETYPE_DB.get("male") or ARCHETYPE_DB.get("old_man")
+    if any(x in tag for x in ["guard", "soldier", "warrior", "captain", "thug"]):
+        return ARCHETYPE_DB.get("guard") or ARCHETYPE_DB.get("thug")
+    if any(x in tag for x in ["goblin", "orc", "monster", "beast", "dragon"]):
+        return ARCHETYPE_DB.get("monster")
+
+    return DM_VOICE_ID or audio_registry.get("dmVoice")
+
+# BACKGROUND AUDIO TASK (Non-Blocking)
+def async_audio_manager(mapped_track_id):
+    if not mapped_track_id or str(mapped_track_id).startswith("sys_"): return
+    
+    print(f"🎵 ASYNC AUDIO: Starting {mapped_track_id}")
+    try:
+        # 1. Kill old audio
+        requests.post(f"{KENKU_URL}/v1/soundboard/stop", timeout=0.5)
+        requests.post(f"{KENKU_URL}/v1/playlist/playback/pause", timeout=0.5)
+        
+        # 2. Set Volume Low (Background Mode)
+        # Kenku API volume is usually 0.0 to 1.0
+        requests.put(f"{KENKU_URL}/v1/playlist/volume", json={"volume": 0.4}, timeout=0.5)
+        
+        # 3. Play New Track
+        requests.put(f"{KENKU_URL}/v1/playlist/play", json={"id": mapped_track_id}, timeout=0.5)
+        requests.put(f"{KENKU_URL}/v1/soundboard/play", json={"id": mapped_track_id}, timeout=0.5)
+    except Exception as e:
+        print(f"❌ AUDIO ERROR: {e}")
+
+# BACKGROUND ASSET TASKS
+def async_create_npc_profile(name, description, location, voice_id):
+    if not ai_available: return
+    paths = get_campaign_paths()
+    os.makedirs(paths["npcs"], exist_ok=True); os.makedirs(paths["images"], exist_ok=True)
+    
+    clean_name = name.split(',')[0].strip()
+    safe_name = re.sub(r'[^a-zA-Z0-9]', '_', clean_name).lower()
+    
+    image_filename = ""
+    try:
+        img_prompt = f"Fantasy Character Portrait: {name}, {description[:150]}"
+        image_filename, _ = ai.generate_image(img_prompt, paths["images"], style="Cinematic Fantasy")
+    except: pass
+
+    try:
+        rel_path = f"assets/images/{image_filename}" if image_filename else ""
+        profile = {
+            "name": clean_name, "desc": description, "location": location,
+            "voice_id": voice_id, "image": rel_path, 
+            "stats": {"class": "Commoner", "level": 1}, "created_at": time.time()
+        }
+        with open(os.path.join(paths["npcs"], f"{safe_name}.json"), "w") as f:
+            json.dump(profile, f, indent=2)
+    except: pass
+
+def async_generate_environment(prompt):
+    if not ai_available: return
+    paths = get_campaign_paths()
+    os.makedirs(paths["images"], exist_ok=True)
+    try:
+        full_prompt = f"Fantasy D&D Environment: {prompt}"
+        ai.generate_image(full_prompt, paths["images"], style="Cinematic Fantasy")
+    except: pass
 
 @router.post("/chat/generate")
-async def generate_response(payload: ChatRequest):
+async def generate_response(payload: ChatRequest, background_tasks: BackgroundTasks):
     if not ai_available: return {"response": "Brain Offline.", "voice_id": "default"}
-    
-    refresh_elevenlabs_voices()
+    sync_voices_from_db()
 
-    # 1. FETCH CONFIG
-    active_campaign = "default"
-    dm_name = "DM"
-    active_voice_id = "default"
-    art_style = "Cinematic Fantasy"
-    matrix_archetypes = {}
-    
+    audio_config = {"dmName": "DM", "dmVoice": DM_VOICE_ID, "soundscapes": []}
     if db is not None:
-        sys_conf = db["system_config"].find_one({"config_id": "main"})
-        if sys_conf: 
-            active_campaign = sys_conf.get("active_campaign", "default")
-            art_style = sys_conf.get("art_style", art_style)
-        
-        audio_conf = db["system_config"].find_one({"config_id": "audio_registry"})
-        if audio_conf:
-            dm_name = audio_conf.get("dmName", "DM")
-            v_val = audio_conf.get("dmVoice", "default")
-            active_voice_id = v_val.get("id", "default") if isinstance(v_val, dict) else v_val
-            
-            raw_arch = audio_conf.get("archetypes", [])
-            for arc in raw_arch:
-                if arc.get("label") and arc.get("voice_id"):
-                    matrix_archetypes[arc["label"].lower()] = arc["voice_id"]
+        try:
+            acr = db["system_config"].find_one({"config_id": "audio_registry"})
+            if acr: audio_config = acr
+        except: pass
 
-    # 2. PLAYER CONTEXT
-    player_context = ""
-    if db is not None:
-        char_data = db["players"].find_one({"discord_id": payload.discord_id})
-        if char_data:
-            player_context = (
-                f"\n[CURRENT SPEAKER]: {char_data.get('name')} (Lvl {char_data.get('level')} {char_data.get('class_name')})"
-            )
+    available_sounds = [s.get("label") for s in audio_config.get("soundscapes", [])]
+    available_archetypes = list(ARCHETYPE_DB.keys())
+    dm_name = audio_config.get('dmName', 'DM')
     
-    # 3. PROMPT CONSTRUCTION
-    if payload.is_meta:
-        system_prompt = "YOU ARE: The Oracle. GOAL: Answer D&D 5e rules concisely. TONE: OOC. NO ROLEPLAY."
-    else:
-        base_prompt = SYSTEM_PROMPT_OVERRIDE or (
-            f"You are {dm_name}, the Dungeon Master. "
-            "RULES: "
-            "1. Keep responses CONCISE (max 3 sentences). "
-            "2. If introducing a NEW scene, output [IMAGE: description] and [SOUND: tag]. "
-            "3. If a NEW NPC is introduced, output [NPC_NEW: {\"name\": \"...\", \"desc\": \"...\", \"location\": \"...\"}]. "
-            "4. If an NPC speaks, output [ACTOR: Name]. "
-            "5. Speak naturally. Do not use markdown."
-        )
-        system_prompt = base_prompt + player_context
+    # SYSTEM PROMPT (Hidden from history to prevent leakage)
+    system_instruction = (
+        f"You are {dm_name}, the Dungeon Master. I am the Player ({payload.player_name}).\n"
+        "**ROLEPLAY ONLY.** Do not explain rules. Do not quote directives. Just play.\n"
+        "1. **REALITY:** You narrate the world. If I do something impossible, describe the failure naturally.\n"
+        f"2. **SOUNDS:** Start scenes with `[SOUND: Label]`. Options: {', '.join(available_sounds)}.\n"
+        f"3. **CASTING:** For NPCs, use `[ACTOR: Name, Role]`. Example: `[ACTOR: Elara, Barmaid]`.\n"
+        "4. **BRIVITY:** Keep descriptions under 4 sentences."
+    )
+    
+    # USER INPUT
+    CHAT_HISTORY.append({"role": "user", "content": payload.message})
+    if len(CHAT_HISTORY) > 6: CHAT_HISTORY.pop(0)
 
-    # 4. GENERATE
-    raw_response = ai.generate_story(system_prompt, payload.message)
+    # GENERATE
+    full_prompt = f"SYSTEM: {system_instruction}\n\n"
+    for turn in CHAT_HISTORY:
+        full_prompt += f"{turn['role'].upper()}: {turn['content']}\n"
+    full_prompt += "ASSISTANT:"
+
+    raw_response = ai.generate_story(system_instruction, full_prompt)
     
-    # 5. PARSE & PROCESS
+    # CLEANUP (Remove hallucinations)
+    raw_response = re.sub(r"\|\s*VOICE_ID:[^\]]+", "", raw_response)
+    if payload.message[:10].lower() in raw_response.lower():
+        raw_response = raw_response.replace(payload.message, "").strip()
+
+    print(f"🧠 RAW: {raw_response}")
+    CHAT_HISTORY.append({"role": "assistant", "content": raw_response})
+
     clean_text = raw_response
-    image_data = None
-    npc_data_payload = None
+    active_voice_id = DM_VOICE_ID or FALLBACK_VOICE_ID
+    current_location = "Unknown"
+    pending_image_prompt = None
     
-    # A. IMAGE
-    match_img = re.search(r"\[IMAGE:\s*(.*?)\]", clean_text, re.IGNORECASE | re.DOTALL)
-    if match_img:
-        visual_prompt = match_img.group(1).strip()
-        clean_text = clean_text.replace(match_img.group(0), "").strip()
-        campaign_path = os.path.join("/campaigns", active_campaign)
-        filename, err = ai.generate_image(visual_prompt, campaign_path, style=art_style)
-        if filename:
-            image_data = {"filename": filename, "prompt": visual_prompt}
-
-    # B. SOUND (Kenku)
+    # --- LOGIC ---
+    
+    # 1. Sound (Async Trigger)
     match_sound = re.search(r"\[SOUND:\s*(.*?)\]", clean_text, re.IGNORECASE)
     if match_sound:
         sound_tag = match_sound.group(1).strip()
-        clean_text = clean_text.replace(match_sound.group(0), "").strip()
-        trigger_sound(sound_tag)
+        current_location = sound_tag
+        
+        # Find ID
+        mapped_id = None
+        for s in audio_config.get("soundscapes", []):
+            if sound_tag.lower() in s.get("label", "").lower():
+                mapped_id = s.get("track_id"); break
+        
+        if mapped_id:
+            # FIRE AND FORGET - Don't wait for audio to start
+            background_tasks.add_task(async_audio_manager, mapped_id)
+        
+        pending_image_prompt = re.sub(r"\[.*?\]", "", clean_text).strip()[:400]
+        background_tasks.add_task(async_generate_environment, pending_image_prompt)
 
-    # C. NPC NEW (Codex)
-    match_npc = re.search(r"\[NPC_NEW:\s*({.*?})\]", clean_text, re.IGNORECASE | re.DOTALL)
-    if match_npc:
-        try:
-            json_str = match_npc.group(1).strip()
-            npc_data_payload = json.loads(json_str)
-            clean_text = clean_text.replace(match_npc.group(0), "").strip()
-        except:
-            print("⚠️ Failed to parse NPC JSON")
-
-    # D. ACTOR (Voice)
+    # 2. Actor
     match_actor = re.search(r"\[ACTOR:\s*(.*?)\]", clean_text, re.IGNORECASE)
     if match_actor:
-        actor_name = match_actor.group(1).strip()
-        actor_key = actor_name.lower()
-        clean_text = clean_text.replace(match_actor.group(0), "").strip()
+        actor_full_tag = match_actor.group(1).strip()
+        found_voice = get_voice_for_role(actor_full_tag, audio_config)
+        if found_voice: active_voice_id = found_voice
         
-        # Priority Logic
-        if actor_key in matrix_archetypes:
-            active_voice_id = matrix_archetypes[actor_key]
-        else:
-            smart_id = smart_cast(actor_name)
-            if smart_id: active_voice_id = smart_id
-            elif actor_key in VOICE_CACHE: active_voice_id = VOICE_CACHE[actor_key]
+        if not match_sound: 
+            desc_text = re.sub(r"\[.*?\]", "", clean_text).strip()[:300]
+            background_tasks.add_task(async_create_npc_profile, actor_full_tag, desc_text, current_location, active_voice_id)
+            pending_image_prompt = f"Fantasy Portrait: {actor_full_tag}, {desc_text}"
 
-    # 6. SAVE CODEX (If new NPC was detected)
-    if npc_data_payload:
-        campaign_path = os.path.join("/campaigns", active_campaign)
-        # Use the voice ID we just assigned (or default if not switched)
-        # Use the image we just generated (if any)
-        img_file = image_data['filename'] if image_data else None
-        save_npc_codex(npc_data_payload, img_file, active_voice_id, campaign_path)
+    clean_text = re.sub(r"\[SOUND:.*?\]", "", clean_text, flags=re.IGNORECASE)
+    clean_text = re.sub(r"\[ACTOR:.*?\]", "", clean_text, flags=re.IGNORECASE) 
+    clean_text = clean_text.strip()
 
-    # 7. HISTORY
-    CHAT_HISTORY.append({"role": "user", "content": payload.message})
-    CHAT_HISTORY.append({"role": "assistant", "content": clean_text})
-    
+    # Manual Image
+    image_data = None
+    if any(x in payload.message.lower() for x in ["show", "draw", "image"]):
+        prompt = clean_text[:300]
+        pending_image_prompt = prompt
+
+    paths = get_campaign_paths()
+    active_campaign_name = paths["name"]
+
     return {
         "response": clean_text, 
         "voice_id": active_voice_id, 
-        "image": image_data
+        "image": image_data,
+        "pending_image_prompt": pending_image_prompt,
+        "active_campaign": active_campaign_name
     }
 
-# ... (Imagine, TTS, Discord Members endpoints remain unchanged) ...
-@router.post("/imagine")
-async def generate_image(payload: ImageRequest):
-    if not ai_available: return {"error": "AI Engine Offline"}
-    active_campaign = "default"
-    art_style = "Cinematic Fantasy"
-    if db is not None:
-        sys_conf = db["system_config"].find_one({"config_id": "main"})
-        if sys_conf: 
-            active_campaign = sys_conf.get("active_campaign", "default")
-            art_style = sys_conf.get("art_style", art_style)
-    campaign_path = os.path.join("/campaigns", active_campaign)
-    filename, error = ai.generate_image(payload.prompt, campaign_path, style=art_style)
-    if error: raise HTTPException(status_code=500, detail=error)
-    return {"status": "success", "filename": filename}
-
+# --- TTS ENDPOINT ---
 @router.post("/tts")
 async def text_to_speech(payload: TTSRequest):
     key = os.getenv("ELEVENLABS_API_KEY")
     if not key: return Response(content=b"", status_code=500)
-    safe_text = payload.text[:600]
-    target_voice = payload.voice_id
-    if target_voice in ["default", "onyx", ""]: target_voice = FALLBACK_VOICE_ID
+    
+    # Priority: 1. Requested ID, 2. Global DM Voice, 3. Hard Safe
+    voices_to_try = [payload.voice_id, DM_VOICE_ID, "onwK4e9ZLuTAKqWW03F9"]
+    voices_to_try = [v for v in voices_to_try if v]
 
-    def try_voice(vid):
+    for vid in voices_to_try:
         try:
             url = f"https://api.elevenlabs.io/v1/text-to-speech/{vid}?optimize_streaming_latency=3"
-            r = requests.post(url, json={"text": safe_text, "model_id": "eleven_monolingual_v1"}, headers={"xi-api-key": key, "Content-Type": "application/json"}, timeout=30)
-            return r
-        except: return None
-
-    response = try_voice(target_voice)
-    if not response or response.status_code != 200:
-        print(f"⚠️ Voice {target_voice} Failed. Fallback to {FALLBACK_VOICE_ID}.")
-        response = try_voice(FALLBACK_VOICE_ID)
-
-    if response and response.status_code == 200: 
-        return Response(content=response.content, media_type="audio/mpeg")
+            r = requests.post(url, json={"text": payload.text[:2000], "model_id": "eleven_monolingual_v1"}, headers={"xi-api-key": key}, timeout=15)
+            if r.status_code == 200: return Response(content=r.content, media_type="audio/mpeg")
+        except: continue
+            
     return Response(content=b"", status_code=500)
 
 @router.get("/discord/members")
@@ -358,5 +306,22 @@ def get_discord_members():
         except: pass
     return [{"id": "bot", "name": "RealmQuest Bot", "status": "online", "role": "System"}]
 
-@router.get("/roster")
-def get_roster(): return []
+@router.get("/brain/status")
+def get_brain_status(): return {"status": "online", "turns": len(CHAT_HISTORY)}
+
+@router.post("/brain/wipe")
+def wipe_memory():
+    global CHAT_HISTORY; CHAT_HISTORY = []; return {"status": "wiped"}
+
+@router.post("/brain/prompt")
+def update_prompt(payload: PromptUpdate):
+    global SYSTEM_PROMPT_OVERRIDE; SYSTEM_PROMPT_OVERRIDE = payload.prompt; return {"status": "updated"}
+    
+@router.post("/imagine")
+async def generate_image(payload: ImageRequest):
+    if not ai_available: return {"error": "AI Engine Offline"}
+    paths = get_campaign_paths()
+    os.makedirs(paths["images"], exist_ok=True)
+    fn, err = ai.generate_image(payload.prompt, paths["images"], style="Cinematic Fantasy")
+    if err: raise HTTPException(status_code=500, detail=err)
+    return {"status": "success", "filename": fn}

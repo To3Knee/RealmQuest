@@ -1,11 +1,28 @@
+# ===============================================================
+# Script Name: config.py
+# Script Location: /opt/RealmQuest/bot/core/config.py
+# Date: 2026-01-27
+# Version: 18.71.0 (Sensory Fix)
+# ===============================================================
+
 import os
 from pymongo import MongoClient
 
-# ENV VARS (Secrets)
+# ENV VARS
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://realmquest-mongo:27017/")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 ELEVEN_KEY = os.getenv("ELEVENLABS_API_KEY")
+
+# DOCKER INTERNAL URLS
+API_URL = os.getenv("API_URL", "http://realmquest-api:8000")
+SCRIBE_URL = os.getenv("SCRIBE_URL", "http://realmquest-scribe:9000")
+
+# AUDIO TUNING
+RMS_THRESHOLD = 20         # <--- FIXED: High threshold filters out room noise
+SILENCE_TIMEOUT = 1.0      
+MAX_RECORD_TIME = 30.0     
+PRE_BUFFER_LEN = 100       
 
 # DB CONNECTION
 _db = None
@@ -18,11 +35,9 @@ def get_db():
     return _db
 
 def get_settings():
-    """Fetches the Master Config from MongoDB"""
     db = get_db()
     conf = db["system_config"].find_one({"config_id": "main"})
-    if not conf:
-        return {} # Should not happen if bootstrap ran
+    if not conf: return {} 
     return conf
 
 def update_settings(updates: dict):
