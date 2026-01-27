@@ -1,0 +1,72 @@
+
+### 🛠️ Manual Emergency Ingestion Protocol
+
+**Pre-requisite:**
+Open your terminal on the host machine (Ripper) and navigate to your tools folder:
+
+```bash
+cd /opt/RealmQuest/tools/language
+
+```
+
+#### Step 1: Inject Files into Container
+
+We copy the script and both zip files into the container's `/packs` directory. We also rename the script to `rq-pack-manager.py` to simplify the commands.
+
+```bash
+# 1. Create the folder inside the container (just in case)
+docker exec realmquest-api mkdir -p /packs
+
+# 2. Copy the Script (Renaming it to standard name)
+docker cp rq-pack-manager-v1.0.3.py realmquest-api:/packs/rq-pack-manager.py
+
+# 3. Copy the Data Packs (CRITICAL STEP)
+docker cp dnd-asr-language-pack-bundle-v1.1.0.zip realmquest-api:/packs/
+docker cp dnd-custom-dictionary-pack-v1.0.0.zip realmquest-api:/packs/
+
+```
+
+#### Step 2: Enter the Container
+
+```bash
+docker exec -it realmquest-api /bin/bash
+
+```
+
+#### Step 3: Run the Ingestion (Inside Container)
+
+Once you are inside the container prompt (`root@...:/app#`), run these commands:
+
+```bash
+# 1. Go to the packs folder
+cd /packs
+
+# 2. Import Hearing (ASR)
+python3 rq-pack-manager.py import \
+  --zip dnd-asr-language-pack-bundle-v1.1.0.zip \
+  --pack asr
+
+# 3. Import Brain (Dictionary)
+python3 rq-pack-manager.py import \
+  --zip dnd-custom-dictionary-pack-v1.0.0.zip \
+  --pack dict
+
+# 4. Compile Hearing Aid (Redis)
+python3 rq-pack-manager.py compile-redis
+
+# 5. Build Knowledge Base (Chroma)
+export RQ_EMBED_PROVIDER=st
+python3 rq-pack-manager.py build-chroma --collection rq_dnd_dictionary
+
+```
+
+#### Step 4: Finish
+
+```bash
+# Exit the container
+exit
+
+# Restart the bot to load the new brain
+docker restart realmquest-bot
+
+```

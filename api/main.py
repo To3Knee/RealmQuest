@@ -2,7 +2,7 @@
 # Script Name: main.py
 # Script Location: /opt/RealmQuest/api/main.py
 # Date: 2026-01-27
-# Version: 18.81.0 (Path Safety)
+# Version: 18.88.0 (Path Safety)
 # ===============================================================
 
 import os
@@ -22,8 +22,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# INIT PATHS (Defaults to collision stone to match your DB)
-# In a perfect world we read DB here too, but hardcoding the mkdir is safe
+# INIT ACTIVE CAMPAIGN PATHS
 active_campaign = "the_collision_stone"
 os.makedirs(f"/campaigns/{active_campaign}/assets/images", exist_ok=True)
 os.makedirs(f"/campaigns/{active_campaign}/codex/npcs", exist_ok=True)

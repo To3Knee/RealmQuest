@@ -14,8 +14,13 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY requirements.txt .
-# Install dependencies (Git required for voice-recv)
+# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# --- CRITICAL PATCH: VOICE ENCRYPTION FIX ---
+# This fixes the "CryptoError" / cutting off sentences
+RUN pip install --force-reinstall "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv"
+# --------------------------------------------
 
 COPY . .
 

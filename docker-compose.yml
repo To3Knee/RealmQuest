@@ -1,9 +1,9 @@
 #===============================================================
 # Script Name: docker-compose.yml
 # Script Location: /opt/RealmQuest/docker-compose.yml
-# Date: 01/26/2026
-# Version: 18.24.0
-# About: Added Persistent Caching for AI Models (Fixes Slow Boot)
+# Date: 01/27/2026
+# Version: 18.25.0
+# About: Fixed API Cache Paths & Volume Mounts
 #===============================================================
 
 services:
@@ -46,31 +46,36 @@ services:
     restart: always
     env_file: .env
     environment:
-      - MONGO_URL=mongodb://realmquest-mongo:27017/
-      - REDIS_URL=redis://realmquest-redis:6379/0
-      - CHROMA_URL=http://realmquest-chroma:8000
-      - KENKU_URL=http://realmquest-kenku:3333
-      - ENV_FILE_PATH=/config/.env
-    ports:
-      - "8000:8000"
+      # Force model libraries to use the mounted cache path
+      - SENTENCE_TRANSFORMERS_HOME=/app/data/cache
+      - TRANSFORMERS_CACHE=/app/data/cache
+      - HF_HOME=/app/data/cache
+      # Database Connections
+      - RQ_MONGO_URI=mongodb://realmquest-mongo:27017
+      - RQ_MONGO_DB=realmquest
+      - RQ_REDIS_HOST=realmquest-redis
+      - RQ_REDIS_PORT=6379
+      - RQ_CHROMA_URL=http://realmquest-chroma:8000
+    depends_on:
+      - rq-mongo
+      - rq-redis
+      - rq-chroma
     volumes:
       - ./api:/app
-      - ./.env:/config/.env
-      - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/campaigns
-      - ${RQ_DATA:-/opt/RealmQuest-Data}:/data
-      - /var/run/docker.sock:/var/run/docker.sock
-      # --- FIX: PERSISTENT MODEL CACHE ---
-      - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/huggingface:/root/.cache/huggingface
-      - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/chroma:/root/.cache/chroma
+      - ./.env:/app/.env
+      # --- PERSISTENT MODEL CACHE ---
+      # This matches the ENV variables in the Dockerfile
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/api-cache:/app/data/cache
     networks:
       - realmquest_net
 
   rq-bot:
     build: ./bot
     container_name: realmquest-bot
-    restart: always
+    restart: unless-stopped
     env_file: .env
     environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
       - API_URL=http://realmquest-api:8000
     depends_on:
       - rq-api
@@ -79,7 +84,7 @@ services:
       - ./.env:/config/.env
       - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/campaigns
       - ${RQ_DATA:-/opt/RealmQuest-Data}:/data
-      # --- FIX: SHARED CACHE ---
+      # Shared Huggingface cache
       - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/huggingface:/root/.cache/huggingface
     networks:
       - realmquest_net
@@ -120,12 +125,12 @@ services:
     container_name: realmquest-portal
     restart: unless-stopped
     ports:
-      - "3000:5173"
-    volumes:
-      - ./portal:/app
-      - /app/node_modules
+      - "3000:3000"
     environment:
-      - VITE_API_URL=http://localhost:8000
+      - API_URL=http://realmquest-api:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - rq-api
     networks:
       - realmquest_net
 

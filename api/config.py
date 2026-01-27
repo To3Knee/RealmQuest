@@ -2,7 +2,7 @@
 # Script Name: config.py
 # Script Location: /opt/RealmQuest/bot/core/config.py
 # Date: 2026-01-27
-# Version: 18.71.0 (Sensory Fix)
+# Version: 21.0.0 (Tuned Hearing)
 # ===============================================================
 
 import os
@@ -19,10 +19,10 @@ API_URL = os.getenv("API_URL", "http://realmquest-api:8000")
 SCRIBE_URL = os.getenv("SCRIBE_URL", "http://realmquest-scribe:9000")
 
 # AUDIO TUNING
-RMS_THRESHOLD = 20         # <--- FIXED: High threshold filters out room noise
-SILENCE_TIMEOUT = 1.0      
-MAX_RECORD_TIME = 30.0     
-PRE_BUFFER_LEN = 100       
+RMS_THRESHOLD = 12         # Filter room noise / breathing
+SILENCE_TIMEOUT = 2.5      # Wait for player to finish sentence
+MAX_RECORD_TIME = 45.0     
+PRE_BUFFER_LEN = 150       
 
 # DB CONNECTION
 _db = None

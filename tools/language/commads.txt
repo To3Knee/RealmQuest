@@ -1,0 +1,54 @@
+
+
+#. Make sure you are in the folder where you saved the new script
+cd /opt/RealmQuest/tools/language
+
+#. Copy the NEW script into the container
+docker cp rq-pack-manager-v1.0.3.py realmquest-api:/tmp/packs/
+
+
+#. Enter the container
+docker exec -it realmquest-api /bin/bash
+
+#. Go to the packs folder
+cd /tmp/packs
+
+#. Verify it is there (you should see v1.0.1 now)
+ls -la
+
+
+************Run These Commands ***************
+
+
+python3 rq-pack-manager-v1.0.3.py import \
+  --zip dnd-asr-language-pack-bundle-v1.1.0.zip \
+  --pack asr
+
+
+
+
+
+python3 rq-pack-manager-v1.0.3.py import \
+  --zip dnd-custom-dictionary-pack-v1.0.0.zip \
+  --pack dict
+
+
+
+
+python3 rq-pack-manager-v1.0.3.py compile-redis
+
+
+
+
+
+export RQ_EMBED_PROVIDER=st
+python3 rq-pack-manager-v1.0.3.py build-chroma --collection rq_dnd_dictionary
+
+
+
+
+Step 3: Finish
+
+    exit
+
+    docker restart realmquest-bot

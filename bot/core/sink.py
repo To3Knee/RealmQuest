@@ -2,7 +2,7 @@
 # Script Name: sink.py
 # Script Location: /opt/RealmQuest/bot/core/sink.py
 # Date: 2026-01-27
-# Version: 18.81.0 (Grand Lexicon & Write Buffer)
+# Version: 21.0.0 (Priority Hearing)
 # ===============================================================
 
 import asyncio
@@ -19,9 +19,10 @@ from core.config import RMS_THRESHOLD, SILENCE_TIMEOUT, MAX_RECORD_TIME, PRE_BUF
 
 logger = logging.getLogger("sink")
 
-# THE GRAND LEXICON (Priming the AI Ear)
+# PRIORITY LEXICON (Common D&D terms FIRST)
 WHISPER_CONTEXT = (
-    "RealmQuest, Dungeon Master, Player Character, NPC, Barmaid, Tavern, Innkeeper, Bartender, "
+    "Ale, Beer, Mead, Drink, Order, Quest Board, I would like, Tavern, Innkeeper, Barmaid, "
+    "RealmQuest, Dungeon Master, Player Character, NPC, "
     "Dungeons and Dragons, 5e, Critical Hit, Initiative, Armor Class, Saving Throw, Ability Check, "
     "Advantage, Disadvantage, Proficiency, Inspiration, Spell Slot, Cantrip, Long Rest, Short Rest, "
     "Hit Points, Temporary HP, Death Save, Exhaustion, Condition, Blinded, Charmed, Deafened, "
@@ -36,9 +37,7 @@ WHISPER_CONTEXT = (
     "Fireball, Cure Wounds, Healing Word, Shield, Mage Armor, Detect Magic, Identify, Counterspell, "
     "Dispel Magic, Haste, Slow, Fly, Invisibility, Polymorph, Banishment, Teleport, Wish, "
     "Bag of Holding, Potion of Healing, Scroll, Wand, Staff, Rod, Ring, Amulet, Cloak, Boots, "
-    "Sword, Shield, Dagger, Bow, Crossbow, Axe, Hammer, Mace, Spear, Staff, D20, D12, D10, D8, D6, D4, "
-    "Aboleth, Abyssal, Celestial, Deep Speech, Draconic, Druidic, Dwarvish, Elvish, Giant, Gnomish, "
-    "Goblin, Halfling, Infernal, Orc, Primordial, Sylvan, Undercommon, TPK, BBEG, AoE, DC, CR, XP"
+    "Sword, Shield, Dagger, Bow, Crossbow, Axe, Hammer, Mace, Spear, Staff, D20, D12, D10, D8, D6, D4"
 )
 
 class ZeroLatencySink(voice_recv.AudioSink):
@@ -56,7 +55,7 @@ class ZeroLatencySink(voice_recv.AudioSink):
         self.muted = False 
         self.meta_mode = False 
         self.task = asyncio.create_task(self.worker())
-        logger.info(f"✅ Audio Sink Attached to {source_channel.name}")
+        print(f"✅ EAR: Attached to {source_channel.name} | Sens: {RMS_THRESHOLD}", flush=True)
 
     def wants_opus(self): return False 
     
@@ -85,7 +84,14 @@ class ZeroLatencySink(voice_recv.AudioSink):
                 
                 try: rms = audioop.rms(pcm, 2)
                 except: rms = 0
-                is_loud = rms > RMS_THRESHOLD
+                
+                # Smart Interrupt: If bot talking, need LOUD voice (RMS 24+)
+                is_bot_talking = False
+                if self.bot.voice_clients and self.bot.voice_clients[0].is_playing():
+                    is_bot_talking = True
+                
+                dynamic_threshold = (RMS_THRESHOLD * 2.5) if is_bot_talking else RMS_THRESHOLD
+                is_loud = rms > dynamic_threshold
                 
                 if not self.speaking:
                     self.pre_buffer.append(pcm)
@@ -94,16 +100,26 @@ class ZeroLatencySink(voice_recv.AudioSink):
                         self.buffer = bytearray(); 
                         for chunk in self.pre_buffer: self.buffer.extend(chunk)
                         self.buffer.extend(pcm)
+                        print(f"🎤 VOICE: {user.display_name} (RMS: {rms:.1f})", flush=True)
+                        if is_bot_talking:
+                            self.bot.voice_clients[0].stop()
                 else:
                     self.buffer.extend(pcm); now = time.time()
                     if is_loud: self.last_speech = now
-                    if (now - self.last_speech > SILENCE_TIMEOUT) or (now - self.start_time > MAX_RECORD_TIME):
-                        await self.process_segment(); self.speaking = False; self.buffer = bytearray(); self.pre_buffer.clear()
+                    
+                    if (now - self.last_speech > SILENCE_TIMEOUT):
+                        print("⏳ SILENCE: Processing...", flush=True)
+                        await self.process_segment()
+                        self.speaking = False; self.buffer = bytearray(); self.pre_buffer.clear()
+                    elif (now - self.start_time > MAX_RECORD_TIME):
+                        await self.process_segment()
+                        self.speaking = False; self.buffer = bytearray(); self.pre_buffer.clear()
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(1)
 
     async def process_segment(self):
         if len(self.buffer) < 20000: return
+        
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, 'wb') as wav_file:
             wav_file.setnchannels(2); wav_file.setsampwidth(2); wav_file.setframerate(48000)
@@ -115,18 +131,19 @@ class ZeroLatencySink(voice_recv.AudioSink):
             async with aiohttp.ClientSession() as session:
                 form = aiohttp.FormData()
                 form.add_field('file', wav_buffer, filename='speech.wav')
-                # INJECT DICTIONARY
                 form.add_field('prompt', WHISPER_CONTEXT) 
                 
                 async with session.post(f"{SCRIBE_URL}/transcribe", data=form) as resp:
                     if resp.status == 200:
                         res = await resp.json()
                         text = res.get("text", "").strip()
+                        print(f"📝 HEARD: '{text}'", flush=True)
         except Exception: return
         
-        if not text or len(text) < 3: return
-        logger.info(f"🗣️ HEARD: '{text}'")
-        
+        if not text or len(text) < 5: 
+            print(f"⛔ IGNORED NOISE: '{text}'", flush=True)
+            return
+            
         uid = str(self.user.id) if self.user else "000000"
         uname = self.user.display_name if self.user else "Traveler"
 
@@ -138,16 +155,17 @@ class ZeroLatencySink(voice_recv.AudioSink):
                         data = await resp.json()
                         reply = data.get("response")
                         voice_id = data.get("voice_id")
-                        
-                        # Dynamic Campaign from API
                         campaign = data.get("active_campaign", "default")
                         
+                        # SINGLE IMAGE LOGIC
+                        image_type = data.get("image_type", "none")
                         pending_prompt = data.get("pending_image_prompt")
-                        if pending_prompt and self.source_channel:
-                             # Send Campaign Name to Image Handler
+                        
+                        if image_type != "none" and pending_prompt:
                              asyncio.create_task(self.trigger_and_post_image(pending_prompt, campaign))
 
-                        if reply: await self.speak(reply, voice_id)
+                        if reply: 
+                            asyncio.create_task(self.speak(reply, voice_id))
         except Exception as e: logger.error(f"Brain Error: {e}")
 
     async def trigger_and_post_image(self, prompt, campaign_name):
@@ -157,8 +175,8 @@ class ZeroLatencySink(voice_recv.AudioSink):
                     if resp.status == 200:
                         res = await resp.json()
                         if res.get("status") == "success":
-                            # 3.0s Buffer to prevent 404
-                            await asyncio.sleep(3.0) 
+                            # Wait for file to write to disk
+                            await asyncio.sleep(2.0) 
                             await self.post_image({"filename": res.get("filename"), "prompt": prompt}, campaign_name)
         except Exception as e: logger.error(f"Auto-Art Fail: {e}")
 
@@ -166,7 +184,6 @@ class ZeroLatencySink(voice_recv.AudioSink):
         fname = img_data.get("filename")
         if not fname: return
         try:
-            # DYNAMIC URL: Uses active campaign name
             file_url = f"{API_URL}/campaigns/{campaign_name}/assets/images/{fname}"
             async with aiohttp.ClientSession() as session:
                 async with session.get(file_url) as resp:
