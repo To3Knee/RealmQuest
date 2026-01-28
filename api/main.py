@@ -2,18 +2,24 @@
 # Script Name: main.py
 # Script Location: /opt/RealmQuest/api/main.py
 # Date: 2026-01-27
-# Version: 18.88.0 (Path Safety)
+# Version: 18.88.1 (User Logic Preserved + Logging)
 # ===============================================================
 
 import os
+import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from chat_engine import router as chat_router
 from campaign_manager import router as system_router
 
+# Setup Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("api")
+
 app = FastAPI()
 
+# --- CORS FIX (CONFIRMED) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,18 +27,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+logger.info("✅ CORS Policy: ENABLED (All Origins)")
 
-# INIT ACTIVE CAMPAIGN PATHS
+# --- CAMPAIGN PATHS ---
 active_campaign = "the_collision_stone"
-os.makedirs(f"/campaigns/{active_campaign}/assets/images", exist_ok=True)
-os.makedirs(f"/campaigns/{active_campaign}/codex/npcs", exist_ok=True)
+try:
+    os.makedirs(f"/campaigns/{active_campaign}/assets/images", exist_ok=True)
+    os.makedirs(f"/campaigns/{active_campaign}/codex/npcs", exist_ok=True)
+    logger.info(f"✅ Active Campaign: {active_campaign}")
+except Exception as e:
+    logger.error(f"❌ Campaign Path Error: {e}")
 
 # Mount the ENTIRE campaigns folder
-app.mount("/campaigns", StaticFiles(directory="/campaigns"))
+app.mount("/campaigns", StaticFiles(directory="/campaigns"), name="campaigns")
 
+# --- ROUTERS ---
 app.include_router(chat_router, prefix="/game")
 app.include_router(system_router, prefix="/system")
 
 @app.get("/")
 def health_check():
-    return {"status": "active", "service": "RealmQuest API"}
+    return {
+        "status": "active", 
+        "service": "RealmQuest API", 
+        "cors": "enabled"
+    }

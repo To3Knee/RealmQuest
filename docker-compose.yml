@@ -2,8 +2,8 @@
 # Script Name: docker-compose.yml
 # Script Location: /opt/RealmQuest/docker-compose.yml
 # Date: 01/27/2026
-# Version: 18.25.0
-# About: Fixed API Cache Paths & Volume Mounts
+# Version: 19.4.0
+# About: Production Config (API Root Access Fix)
 #===============================================================
 
 services:
@@ -44,13 +44,18 @@ services:
     build: ./api
     container_name: realmquest-api
     restart: always
+    # -----------------------------------------------
+    # CRITICAL FIX 1: API NEEDS ROOT & DOCKER ACCESS
+    # The API reads the logs/env to send to the Portal
+    # -----------------------------------------------
+    user: root
+    ports:
+      - "8000:8000"
     env_file: .env
     environment:
-      # Force model libraries to use the mounted cache path
       - SENTENCE_TRANSFORMERS_HOME=/app/data/cache
       - TRANSFORMERS_CACHE=/app/data/cache
       - HF_HOME=/app/data/cache
-      # Database Connections
       - RQ_MONGO_URI=mongodb://realmquest-mongo:27017
       - RQ_MONGO_DB=realmquest
       - RQ_REDIS_HOST=realmquest-redis
@@ -63,9 +68,11 @@ services:
     volumes:
       - ./api:/app
       - ./.env:/app/.env
-      # --- PERSISTENT MODEL CACHE ---
-      # This matches the ENV variables in the Dockerfile
+      # --- CRITICAL FIX 2: GIVE API THE SOCKET ---
+      - /var/run/docker.sock:/var/run/docker.sock
+      # -------------------------------------------
       - ${RQ_DATA:-/opt/RealmQuest-Data}/api-cache:/app/data/cache
+      - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/chroma:/root/.cache/chroma
     networks:
       - realmquest_net
 
@@ -84,7 +91,6 @@ services:
       - ./.env:/config/.env
       - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/campaigns
       - ${RQ_DATA:-/opt/RealmQuest-Data}:/data
-      # Shared Huggingface cache
       - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/huggingface:/root/.cache/huggingface
     networks:
       - realmquest_net
@@ -124,13 +130,20 @@ services:
     build: ./portal
     container_name: realmquest-portal
     restart: unless-stopped
+    # Portal needs root to read .env for itself
+    user: root
     ports:
-      - "3000:3000"
+      - "3000:5173"
+    volumes:
+      - ./portal:/app
+      - /app/node_modules
+      - ./.env:/app/.env
+      - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/app/campaign
     environment:
-      - API_URL=http://realmquest-api:8000
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-    depends_on:
-      - rq-api
+      # YOUR SERVER IP ADDRESS
+      - API_URL=http://192.168.10.165:8000
+      - NEXT_PUBLIC_API_URL=http://192.168.10.165:8000
+      - VITE_API_URL=http://192.168.10.165:8000
     networks:
       - realmquest_net
 
