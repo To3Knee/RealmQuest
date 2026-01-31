@@ -2,7 +2,7 @@
 # Script Name: chat_engine.py
 # Script Location: /opt/RealmQuest/api/chat_engine.py
 # Date: 2026-01-27
-# Version: 21.0.0 (Performance & Realism)
+# Version: 21.1.0 (Performance & Realism)
 # ===============================================================
 
 import os
@@ -52,11 +52,104 @@ class TTSRequest(BaseModel):
 
 class ImageRequest(BaseModel):
     prompt: str
+    # Optional routing metadata (backwards compatible; bot can pass these)
+    kind: str | None = None            # e.g. "npc", "scene", "generic"
+    npc_name: str | None = None        # Used when kind == "npc"
+    output_filename: str | None = None # Advanced: force filename (server will sanitize)
 
 class PromptUpdate(BaseModel):
     prompt: str
 
-CHAT_HISTORY = [] 
+CHAT_HISTORY = []
+SYSTEM_PROMPT_OVERRIDE = ""
+
+def _slugify(value: str) -> str:
+    value = (value or "").strip().lower()
+    value = re.sub(r"[^a-z0-9\s_-]", "", value)
+    value = re.sub(r"[\s_-]+", "-", value).strip("-")
+    return value or "npc"
+
+
+def _norm_key(s: str) -> str:
+    return "".join([c for c in (s or "").lower() if c.isalnum()])
+
+def _best_match_npc_json(npcs_dir: str, npc_name: str) -> str | None:
+    """Find an existing NPC dossier basename that matches npc_name."""
+    try:
+        import difflib
+        target = _norm_key(npc_name)
+        if not target:
+            return None
+
+        candidates = []
+        norm_to_stem = {}
+
+        for fn in os.listdir(npcs_dir):
+            if not fn.lower().endswith(".json"):
+                continue
+            stem = os.path.splitext(fn)[0]
+            nk = _norm_key(stem)
+            if nk:
+                candidates.append(nk)
+                norm_to_stem[nk] = stem
+
+        if target in norm_to_stem:
+            return norm_to_stem[target]
+
+        close = difflib.get_close_matches(target, candidates, n=1, cutoff=0.78)
+        if close:
+            return norm_to_stem.get(close[0])
+
+        for nk, stem in norm_to_stem.items():
+            if target in nk or nk in target:
+                return stem
+    except Exception:
+        return None
+    return None
+
+def _load_gallery_index(index_path: str):
+    try:
+        if not os.path.exists(index_path):
+            return []
+        with open(index_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return [x for x in data.get("items") if isinstance(x, dict)]
+    except Exception:
+        return []
+    return []
+
+def _save_gallery_index(index_path: str, items):
+    try:
+        tmp = index_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, index_path)
+    except Exception:
+        pass
+
+def _upsert_gallery_entry(index_path: str, entry: dict):
+    items = _load_gallery_index(index_path)
+    fn = str(entry.get("filename") or "").strip()
+    if not fn:
+        return
+    updated = False
+    for i, it in enumerate(items):
+        if isinstance(it, dict) and str(it.get("filename") or "").strip() == fn:
+            items[i] = {**it, **entry}
+            updated = True
+            break
+    if not updated:
+        items.append(entry)
+    try:
+        items.sort(key=lambda x: float(x.get("created_at_epoch", 0)) if isinstance(x, dict) else 0)
+    except Exception:
+        pass
+    _save_gallery_index(index_path, items)
+
+SYSTEM_PROMPT_OVERRIDE = ""
 
 # --- HELPERS ---
 
@@ -156,6 +249,10 @@ async def generate_response(payload: ChatRequest, background_tasks: BackgroundTa
         f"2. **SOUNDS:** Use `[SOUND: Label]` ONLY if the location changes.\n"
         "3. **BREVITY:** Keep descriptions under 4 sentences."
     )
+
+    # Optional runtime override (Neural Config). Prepend so it acts as higher-priority rules.
+    if SYSTEM_PROMPT_OVERRIDE.strip():
+        system_instruction = SYSTEM_PROMPT_OVERRIDE.strip() + "\n\n" + system_instruction
     
     CHAT_HISTORY.append({"role": "user", "content": payload.message})
     if len(CHAT_HISTORY) > 6: CHAT_HISTORY.pop(0)
@@ -195,10 +292,15 @@ async def generate_response(payload: ChatRequest, background_tasks: BackgroundTa
         pending_prompt = re.sub(r"\[.*?\]", "", clean_text).strip()[:400]
         image_type = "scene"
 
+    npc_name = None
+
     # 2. Actor Logic (Overrides Scene)
+    npc_name = None
     match_actor = re.search(r"\[ACTOR:\s*(.*?)\]", clean_text, re.IGNORECASE)
     if match_actor:
         actor_full_tag = match_actor.group(1).strip()
+        # Extract a stable NPC name for downstream tooling (bot, portal)
+        npc_name = actor_full_tag.split(",", 1)[0].strip() or None
         found_voice = get_voice_for_role(actor_full_tag, audio_config)
         if found_voice: active_voice_id = found_voice
         
@@ -223,6 +325,7 @@ async def generate_response(payload: ChatRequest, background_tasks: BackgroundTa
         "voice_id": active_voice_id, 
         "pending_image_prompt": pending_prompt,
         "image_type": image_type, # Instructs Bot what to do
+        "npc_name": npc_name,
         "active_campaign": paths["name"]
     }
 
@@ -250,7 +353,16 @@ def get_discord_members():
     return [{"id": "bot", "name": "RealmQuest Bot", "status": "online", "role": "System"}]
 
 @router.get("/brain/status")
-def get_brain_status(): return {"status": "online", "turns": len(CHAT_HISTORY)}
+def get_brain_status():
+    return {
+        "status": "online" if ai_available else "offline",
+        "turns": len(CHAT_HISTORY),
+        "history": CHAT_HISTORY,
+        "system_prompt": SYSTEM_PROMPT_OVERRIDE,
+        "stats": {
+            "ai_available": ai_available,
+        },
+    }
 
 @router.post("/brain/wipe")
 def wipe_memory():
@@ -262,13 +374,102 @@ def update_prompt(payload: PromptUpdate):
     
 @router.post("/imagine")
 async def generate_image(payload: ImageRequest):
-    if not ai_available: return {"error": "AI Engine Offline"}
+    """Generate an image and place it into the correct campaign folder.
+
+    Phase 3.5 rules:
+      - NPC portraits go to:    /campaigns/<camp>/codex/npcs/
+      - All other art goes to: /campaigns/<camp>/assets/images/
+      - Maintain gallery context index at /assets/images/gallery.json
+    """
+    if not ai_available:
+        return {"status": "error", "message": "AI Engine Offline"}
+
     paths = get_campaign_paths()
     os.makedirs(paths["images"], exist_ok=True)
-    
-    # REALISTIC ART STYLE INJECTION
-    style_prompt = f"Dungeons & Dragons 5e art, oil painting, realistic lighting, grim fantasy, detailed. NO cartoons. {payload.prompt}"
-    
-    fn, err = ai.generate_image(style_prompt, paths["root"], style="Cinematic Fantasy")
-    if err: raise HTTPException(status_code=500, detail=err)
-    return {"status": "success", "filename": fn}
+    os.makedirs(paths["npcs"], exist_ok=True)
+
+    kind_raw = (payload.kind or "generic").strip().lower()
+    npc_name = (payload.npc_name or "").strip() or None
+
+    # Keep existing cinematic realism style injection
+    style_prompt = (
+        "Dungeons & Dragons 5e art, oil painting, realistic lighting, grim fantasy, detailed. "
+        "NO cartoons. "
+        f"{payload.prompt}"
+    )
+
+    # Treat npc-like kinds as NPC portraits (backwards compatible)
+    is_npc = False
+    if npc_name:
+        is_npc = True
+    if kind_raw.startswith("npc") or ("npc" in kind_raw):
+        is_npc = True
+    if kind_raw in {"portrait", "character", "hero", "villager"}:
+        is_npc = True
+
+    # Decide output filename (sanitize)
+    if payload.output_filename:
+        out_name = os.path.basename(payload.output_filename.strip())
+    elif is_npc:
+        base = _best_match_npc_json(paths["npcs"], npc_name) if npc_name else None
+        if not base:
+            base = _slugify(npc_name or payload.prompt).replace("-", "_")
+        out_name = f"{base}.png"
+    else:
+        out_name = f"vis_{int(time.time())}.png"
+
+    if not re.search(r"\.(png|jpg|jpeg|webp)$", out_name, re.IGNORECASE):
+        out_name = out_name + ".png"
+
+    output_dir = paths["npcs"] if is_npc else paths["images"]
+
+    fn, err = ai.generate_image(
+        style_prompt,
+        paths["root"],
+        style="Cinematic Fantasy",
+        output_dir=output_dir,
+        output_filename=out_name,
+    )
+    if err:
+        raise HTTPException(status_code=500, detail=err)
+
+    if is_npc:
+        url = f"/campaigns/{paths['name']}/codex/npcs/{fn}"
+        kind_out = "npc"
+    else:
+        url = f"/campaigns/{paths['name']}/assets/images/{fn}"
+        kind_out = (kind_raw or "generic")
+
+    # Gallery context index lives in assets/images/gallery.json (campaign-specific)
+    index_path = os.path.join(paths["images"], "gallery.json")
+    entry = {
+        "filename": fn,
+        "url": url,
+        "kind": kind_out,
+        "prompt": payload.prompt,
+        "npc_name": npc_name,
+        "npc_id": (_slugify(npc_name).replace("-", "_") if npc_name else None),
+        "created_at_epoch": float(time.time()),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "created_by": (payload.player_name or payload.discord_id or None),
+        "source": (payload.source or "unknown"),
+    }
+    _upsert_gallery_entry(index_path, entry)
+
+    # If NPC portrait and a dossier exists, update its image path to codex/npcs/<file>
+    if is_npc and npc_name:
+        try:
+            stem = _best_match_npc_json(paths["npcs"], npc_name)
+            if stem:
+                jf = os.path.join(paths["npcs"], f"{stem}.json")
+                if os.path.exists(jf):
+                    with open(jf, "r", encoding="utf-8") as f:
+                        dossier = json.load(f)
+                    if isinstance(dossier, dict):
+                        dossier["image"] = f"codex/npcs/{fn}"
+                        with open(jf, "w", encoding="utf-8") as f:
+                            json.dump(dossier, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    return {"status": "success", "filename": fn, "url": url, "campaign": paths["name"], "kind": kind_out}

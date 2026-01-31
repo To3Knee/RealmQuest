@@ -2,7 +2,7 @@
 # Script Name: Dockerfile
 # Script Location: /opt/RealmQuest/api/Dockerfile
 # Date: 2026-01-27
-# Version: 18.9.4 (Fixes Volume Trap)
+# Version: 18.9.5 (Adds python-multipart)
 # ===============================================================
 
 FROM python:3.11-slim
@@ -24,6 +24,8 @@ WORKDIR /app
 # Install Python Dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Needed for FastAPI file uploads (multipart/form-data)
+RUN pip install --no-cache-dir python-multipart
 
 # --- OPTIMIZATION: PERSISTENT CACHE POINTERS ---
 ENV SENTENCE_TRANSFORMERS_HOME=/app/data/cache

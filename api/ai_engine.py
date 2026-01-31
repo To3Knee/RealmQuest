@@ -93,8 +93,20 @@ class AIEngine:
         return "AI Offline."
 
     # --- IMAGE ---
-    def generate_image(self, prompt, campaign_path="/campaigns/default", style="Cinematic Fantasy, D&D Art"):
-        """Generates an image via DALL-E 3"""
+    def generate_image(
+        self,
+        prompt,
+        campaign_path="/campaigns/default",
+        style="Cinematic Fantasy, D&D Art",
+        output_dir=None,
+        output_filename=None,
+    ):
+        """Generates an image via DALL-E 3.
+
+        Surgical extension:
+        - Backwards compatible (default output remains campaign_path/assets/images)
+        - Allows caller to specify output_dir and/or output_filename
+        """
         if not self.openai_client:
             return None, "OpenAI Key Missing"
 
@@ -105,9 +117,18 @@ class AIEngine:
             )
             image_url = response.data[0].url
 
-            assets_dir = os.path.join(campaign_path, "assets", "images")
+            assets_dir = output_dir or os.path.join(campaign_path, "assets", "images")
             os.makedirs(assets_dir, exist_ok=True)
-            filename = f"vis_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
+
+            if output_filename:
+                # Ensure a safe filename, always .png (DALL-E returns a PNG-friendly URL)
+                safe = os.path.basename(str(output_filename)).strip() or "image"
+                if not safe.lower().endswith(".png"):
+                    safe = f"{safe}.png"
+                filename = safe
+            else:
+                filename = f"vis_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
+
             file_path = os.path.join(assets_dir, filename)
 
             img_data = requests.get(image_url).content

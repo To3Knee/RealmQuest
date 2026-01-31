@@ -71,6 +71,8 @@ services:
       # --- CRITICAL FIX 2: GIVE API THE SOCKET ---
       - /var/run/docker.sock:/var/run/docker.sock
       # -------------------------------------------
+      # --- CRITICAL FIX 3: GIVE API CAMPAIGN ACCESS ---
+      - ${RQ_CAMPAIGNS:-/opt/RealmQuest-Campaigns}:/campaigns
       - ${RQ_DATA:-/opt/RealmQuest-Data}/api-cache:/app/data/cache
       - ${RQ_DATA:-/opt/RealmQuest-Data}/cache/chroma:/root/.cache/chroma
     networks:

@@ -1,3 +1,12 @@
+#================================================
+#Script Name: sink.py
+#Version: 3.5.0
+#Date: 2026-01-31
+#Author: ChatGPT (GPT-5.2 Thinking) for To3Knee
+#GitHub: https://github.com/To3Knee/RealmQuest
+#About: Phase 3.5 - Include context metadata when requesting images from the API (campaign gallery index).
+#================================================
+
 # ===============================================================
 # Script Name: sink.py
 # Script Location: /opt/RealmQuest/bot/core/sink.py
@@ -162,29 +171,53 @@ class ZeroLatencySink(voice_recv.AudioSink):
                         pending_prompt = data.get("pending_image_prompt")
                         
                         if image_type != "none" and pending_prompt:
-                             asyncio.create_task(self.trigger_and_post_image(pending_prompt, campaign))
+                            asyncio.create_task(
+                                self.trigger_and_post_image(
+                                    pending_prompt,
+                                    campaign_name=campaign,
+                                    kind=image_type,
+                                    npc_name=data.get("npc_name"),
+                                )
+                            )
 
                         if reply: 
                             asyncio.create_task(self.speak(reply, voice_id))
         except Exception as e: logger.error(f"Brain Error: {e}")
 
-    async def trigger_and_post_image(self, prompt, campaign_name):
+    async def trigger_and_post_image(self, prompt, campaign_name, kind="generic", npc_name=None):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(f"{API_URL}/game/imagine", json={"prompt": prompt}) as resp:
+                payload = {"prompt": prompt, "kind": kind}
+                if npc_name:
+                    payload["npc_name"] = npc_name
+                async with session.post(f"{API_URL}/game/imagine", json=payload) as resp:
                     if resp.status == 200:
                         res = await resp.json()
                         if res.get("status") == "success":
                             # Wait for file to write to disk
                             await asyncio.sleep(2.0) 
-                            await self.post_image({"filename": res.get("filename"), "prompt": prompt}, campaign_name)
+                            await self.post_image(
+                                {
+                                    "filename": res.get("filename"),
+                                    "prompt": prompt,
+                                    "url": res.get("url"),
+                                    "kind": res.get("kind"),
+                                },
+                                campaign_name,
+                            )
         except Exception as e: logger.error(f"Auto-Art Fail: {e}")
 
     async def post_image(self, img_data, campaign_name):
         fname = img_data.get("filename")
         if not fname: return
         try:
-            file_url = f"{API_URL}/campaigns/{campaign_name}/assets/images/{fname}"
+            # Prefer server-provided URL (supports NPC codex co-location)
+            file_url = img_data.get("url")
+            if file_url:
+                if file_url.startswith("/"):
+                    file_url = f"{API_URL}{file_url}"
+            else:
+                file_url = f"{API_URL}/campaigns/{campaign_name}/assets/images/{fname}"
             async with aiohttp.ClientSession() as session:
                 async with session.get(file_url) as resp:
                     if resp.status == 200:

@@ -1,8 +1,12 @@
-# -----------------------------------------------------------------------------
-# RealmQuest API - Campaign/System Manager Router
-# File: api/campaign_manager.py
-# Version: v19.11.0 (Golden Master: Auth + Logs + Campaign Management)
-# -----------------------------------------------------------------------------
+#===============================================================
+#Script Name: campaign_manager.py
+#Script Location: /opt/RealmQuest/api/campaign_manager.py
+#Date: 01/31/2026
+#Created By: T03KNEE
+#Github: https://github.com/To3Knee/RealmQuest
+#Version: 19.13.1
+#About: Phase 3.7 Hotfix - Import missing FastAPI symbols (Query/File/UploadFile) for delete/replace routes.
+#===============================================================
 
 import os
 import shutil
@@ -10,10 +14,11 @@ import logging
 import requests
 import docker
 import json
+import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 from dotenv import dotenv_values, set_key, unset_key
-from fastapi import APIRouter, HTTPException, Body, Request
+from fastapi import APIRouter, HTTPException, Body, Request, Query, UploadFile, File
 from pydantic import BaseModel
 from pymongo import MongoClient
 
@@ -178,6 +183,596 @@ def forge_create(draft: ForgeDraft):
     except Exception as e:
         raise HTTPException(500, f"Forge failed: {e}")
 
+
+# -----------------------------
+# 3B. CODEX + GALLERY BRIDGE (API)
+# -----------------------------
+# These endpoints unify campaign filesystem content into simple JSON payloads
+# for the Portal. They are read-only and do not mutate campaigns.
+#
+# Codex Bridge:
+#   - Lists /codex/npcs/*.json for the active campaign
+#   - Attempts to resolve a portrait image by basename or best-match
+#   - Returns dossiers + resolved portrait URLs
+#
+# Gallery Bridge:
+#   - Lists /assets/images/* for the active campaign
+#   - Returns URLs + basic metadata for the Portal gallery
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+
+def _active_campaign_dir() -> Path:
+    camp_id = _get_active_campaign_id()
+    return (CAMPAIGNS_DIR / camp_id)
+
+def _safe_read_json(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _norm_key(s: str) -> str:
+    # Normalize names for matching: lower, alnum only.
+    return "".join([c for c in (s or "").lower() if c.isalnum()])
+
+def _collect_images(*dirs: Path) -> List[Path]:
+    out: List[Path] = []
+    for d in dirs:
+        try:
+            if d.exists() and d.is_dir():
+                for p in d.iterdir():
+                    if p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
+                        out.append(p)
+        except Exception:
+            continue
+    return out
+
+def _best_match_image(stem: str, images: List[Path]) -> Optional[Path]:
+    """Resolve portrait via basename + fuzzy matching."""
+    import difflib
+
+    target = _norm_key(stem)
+    if not target:
+        return None
+
+    norm_map: Dict[str, Path] = {}
+    for p in images:
+        nk = _norm_key(p.stem)
+        if nk and nk not in norm_map:
+            norm_map[nk] = p
+
+    if target in norm_map:
+        return norm_map[target]
+
+    candidates = list(norm_map.keys())
+    close = difflib.get_close_matches(target, candidates, n=1, cutoff=0.78)
+    if close:
+        return norm_map.get(close[0])
+
+    for nk, p in norm_map.items():
+        if target in nk or nk in target:
+            return p
+
+    return None
+
+
+def _resolve_image_from_dossier(dossier: Optional[Dict[str, Any]], base: Path, camp_id: str) -> Optional[Dict[str, Any]]:
+    """Prefer explicit dossier image field when present (supports legacy layouts)."""
+    if not isinstance(dossier, dict):
+        return None
+    img = dossier.get("image") or dossier.get("portrait") or dossier.get("portrait_path")
+    if not img:
+        return None
+    try:
+        fname = Path(str(img)).name
+        if not fname:
+            return None
+        # Check codex/npcs first (preferred), then assets/images
+        codex = base / "codex" / "npcs" / fname
+        assets = base / "assets" / "images" / fname
+
+        if codex.exists():
+            return {"filename": fname, "url": f"/campaigns/{camp_id}/codex/npcs/{fname}", "source_dir": "codex/npcs"}
+        if assets.exists():
+            return {"filename": fname, "url": f"/campaigns/{camp_id}/assets/images/{fname}", "source_dir": "assets/images"}
+    except Exception:
+        return None
+    return None
+
+def _load_gallery_index(assets_dir: Path) -> List[Dict[str, Any]]:
+    """Load campaign gallery index (assets/images/gallery.json)."""
+    idx = assets_dir / "gallery.json"
+    if not idx.exists():
+        return []
+    try:
+        with open(idx, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return [x for x in data.get("items") if isinstance(x, dict)]
+    except Exception:
+        return []
+    return []
+
+def _save_gallery_index(assets_dir: Path, items: List[Dict[str, Any]]) -> None:
+    """Persist gallery index to assets/images/gallery.json (list format)."""
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    idx = assets_dir / "gallery.json"
+    tmp = assets_dir / ".gallery.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    tmp.replace(idx)
+
+
+def _scan_npc_image_references(codex_dir: Path, filename: str) -> List[str]:
+    """Return list of NPC json filenames that reference a given image filename."""
+    refs: List[str] = []
+    if not codex_dir.exists():
+        return refs
+    target = filename.strip()
+    if not target:
+        return refs
+    for p in sorted(codex_dir.glob("*.json")):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+            img = str(data.get("image") or data.get("portrait") or data.get("avatar") or "").strip()
+            if not img:
+                continue
+            # Match by exact filename or by suffix path segment
+            if img == target or img.endswith("/" + target) or img.endswith("\\" + target):
+                refs.append(p.name)
+        except Exception:
+            continue
+    return refs
+
+
+def _safe_unlink(path: Path) -> bool:
+    """Attempt to unlink a file; returns True if removed."""
+    try:
+        if path.exists() and path.is_file():
+            path.unlink()
+            return True
+    except Exception:
+        return False
+    return False
+
+def _gallery_meta_map(assets_dir: Path) -> Dict[str, Dict[str, Any]]:
+    """Map filename -> metadata from gallery.json."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for entry in _load_gallery_index(assets_dir):
+        fn = str(entry.get("filename") or entry.get("file") or "").strip()
+        if fn:
+            out[fn] = entry
+    return out
+
+@router.get("/campaigns/codex/npcs")
+def codex_npcs(include_dossier: bool = True):
+    """Return NPC dossiers for the active campaign with resolved portrait URLs."""
+    camp_id = _get_active_campaign_id()
+    base = _active_campaign_dir()
+    codex_dir = base / "codex" / "npcs"
+    assets_dir = base / "assets" / "images"
+
+    if not codex_dir.exists():
+        return {"campaign": camp_id, "items": []}
+
+    images = _collect_images(codex_dir, assets_dir)
+
+    items: List[Dict[str, Any]] = []
+    for jf in sorted(codex_dir.glob("*.json")):
+        stem = jf.stem
+        dossier = _safe_read_json(jf) if include_dossier else None
+
+        display_name = None
+        if isinstance(dossier, dict):
+            display_name = dossier.get("name") or dossier.get("npc_name") or dossier.get("title")
+
+        if not display_name:
+            display_name = stem.replace("_", " ").replace("-", " ").title()
+
+        # Prefer explicit dossier image field when present (supports legacy JSON: "image": "assets/images/<file>.png")
+        portrait_obj = _resolve_image_from_dossier(dossier, base, camp_id)
+
+        # Otherwise attempt basename/fuzzy match across codex + assets
+        if portrait_obj is None:
+            portrait_path = _best_match_image(stem, images)
+            if portrait_path:
+                try:
+                    source_dir = "assets/images" if "assets/images" in str(portrait_path) else "codex/npcs"
+                    if source_dir == "assets/images":
+                        url = f"/campaigns/{camp_id}/assets/images/{portrait_path.name}"
+                    else:
+                        url = f"/campaigns/{camp_id}/codex/npcs/{portrait_path.name}"
+                    portrait_obj = {"filename": portrait_path.name, "url": url, "source_dir": source_dir}
+                except Exception:
+                    portrait_obj = None
+
+        items.append({
+            "id": stem,
+            "name": display_name,
+            "json_filename": jf.name,
+            "json_url": f"/campaigns/{camp_id}/codex/npcs/{jf.name}",
+            "portrait": portrait_obj,
+            "dossier": dossier if include_dossier else None
+        })
+
+    return {"campaign": camp_id, "items": items}
+
+
+@router.delete("/campaigns/gallery/images/{filename}")
+def campaign_gallery_delete_image(filename: str, force: bool = Query(False, description="Delete even if referenced by NPC dossiers")):
+    """Delete a gallery image from assets/images and update gallery.json."
+
+    Safety:
+      - If the image is referenced by one or more NPC dossiers, this returns HTTP 409 unless force=true.
+    """
+    camp_id = _get_active_campaign_id()
+    base = _active_campaign_dir()
+    assets_dir = base / "assets" / "images"
+    codex_dir = base / "codex" / "npcs"
+
+    filename = (filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename required")
+
+    # Prevent directory traversal
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    refs = _scan_npc_image_references(codex_dir, filename)
+    if refs and not force:
+        raise HTTPException(status_code=409, detail={"reason": "referenced_by_npcs", "refs": refs})
+
+    img_path = assets_dir / filename
+    removed = _safe_unlink(img_path)
+
+    # Update gallery.json by removing entries with this filename
+    idx_items = _load_gallery_index(assets_dir)
+    idx_items = [x for x in idx_items if str(x.get("filename") or x.get("file") or "").strip() != filename]
+    _save_gallery_index(assets_dir, idx_items)
+
+    return {"campaign": camp_id, "filename": filename, "deleted": bool(removed), "referenced_by": refs}
+
+
+@router.post("/campaigns/gallery/images/{filename}/replace")
+async def campaign_gallery_replace_image(filename: str, file: UploadFile = File(...)):
+    """Replace the bytes for a gallery image (keeps filename + URL stable) and refresh gallery.json metadata."""
+    camp_id = _get_active_campaign_id()
+    base = _active_campaign_dir()
+    assets_dir = base / "assets" / "images"
+
+    filename = (filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename required")
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    dst = assets_dir / filename
+
+    # Basic extension sanity
+    ext = Path(filename).suffix.lower()
+    if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
+        raise HTTPException(status_code=400, detail="only png/jpg/jpeg/webp allowed")
+
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"failed to read upload: {e}")
+
+    if not content:
+        raise HTTPException(status_code=400, detail="empty upload")
+
+    tmp = assets_dir / f".{filename}.upload.tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(content)
+        tmp.replace(dst)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
+    stat = dst.stat()
+    meta_map = _gallery_meta_map(assets_dir)
+    entry = meta_map.get(filename, {})
+    # preserve existing fields, but refresh size + modified time
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    entry["filename"] = filename
+    entry["bytes"] = stat.st_size
+    entry["modified_epoch"] = int(stat.st_mtime)
+    entry.setdefault("meta", {})
+    if isinstance(entry.get("meta"), dict):
+        entry["meta"]["updated_at"] = time.time()
+        entry["meta"]["updated_at_epoch"] = int(time.time())
+
+    # Write back into gallery.json list (upsert)
+    idx_items = _load_gallery_index(assets_dir)
+    wrote = False
+    for i, it in enumerate(idx_items):
+        fn = str(it.get("filename") or it.get("file") or "").strip()
+        if fn == filename:
+            idx_items[i] = entry
+            wrote = True
+            break
+    if not wrote:
+        idx_items.insert(0, entry)
+    _save_gallery_index(assets_dir, idx_items)
+
+    return {"campaign": camp_id, "item": _build_gallery_item(assets_dir, filename, meta_map={filename: entry})}
+
+
+@router.delete("/campaigns/codex/npcs/{npc_id}")
+def codex_delete_npc(npc_id: str, delete_portrait: bool = Query(True, description="Also delete the portrait image referenced by the dossier, if present")):
+    """Delete an NPC dossier JSON and optionally its portrait image."""
+    camp_id = _get_active_campaign_id()
+    base = _active_campaign_dir()
+    codex_dir = base / "codex" / "npcs"
+    assets_dir = base / "assets" / "images"
+
+    npc_id = (npc_id or "").strip()
+    if not npc_id:
+        raise HTTPException(status_code=400, detail="npc_id required")
+    # prevent traversal
+    if "/" in npc_id or "\\" in npc_id or npc_id.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid npc_id")
+
+    json_path = codex_dir / f"{npc_id}.json"
+    if not json_path.exists():
+        # try the legacy naming if caller provided filename-like id
+        alt = codex_dir / npc_id
+        if alt.exists() and alt.suffix.lower() == ".json":
+            json_path = alt
+        else:
+            raise HTTPException(status_code=404, detail="npc dossier not found")
+
+    portrait_deleted = False
+    portrait_target = None
+
+    if delete_portrait:
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                img = str(data.get("image") or data.get("portrait") or data.get("avatar") or "").strip()
+                if img:
+                    portrait_target = img
+        except Exception:
+            portrait_target = None
+
+        # Resolve portrait path within campaign dir only
+        if portrait_target:
+            # normalize and strip leading slash
+            p = portrait_target.lstrip("/").replace("\\", "/")
+            # only allow within these roots
+            candidates = [
+                base / p,
+                assets_dir / Path(p).name,           # if only filename
+                codex_dir / Path(p).name,            # if portrait stored in codex dir
+            ]
+            for cand in candidates:
+                try:
+                    cand = cand.resolve()
+                except Exception:
+                    continue
+                # Ensure candidate is under campaign base
+                try:
+                    if not str(cand).startswith(str(base.resolve())):
+                        continue
+                except Exception:
+                    continue
+                if cand.exists() and cand.is_file():
+                    portrait_deleted = _safe_unlink(cand)
+                    # If it was an assets/images file, also remove from gallery.json
+                    if portrait_deleted and str(cand).startswith(str(assets_dir.resolve())):
+                        fn = cand.name
+                        idx_items = _load_gallery_index(assets_dir)
+                        idx_items = [x for x in idx_items if str(x.get("filename") or x.get("file") or "").strip() != fn]
+                        _save_gallery_index(assets_dir, idx_items)
+                    break
+
+    dossier_deleted = _safe_unlink(json_path)
+
+    return {
+        "campaign": camp_id,
+        "npc_id": npc_id,
+        "dossier_deleted": bool(dossier_deleted),
+        "portrait_deleted": bool(portrait_deleted),
+        "portrait_target": portrait_target,
+    }
+
+
+@router.post("/campaigns/codex/npcs/{npc_id}/portrait")
+async def codex_replace_portrait(npc_id: str, file: UploadFile = File(...)):
+    """Upload/replace an NPC portrait and update the dossier's image field.
+
+    This writes the portrait into /codex/npcs/ as <npc_id>.<ext> (stable and NPC-scoped).
+    """
+    camp_id = _get_active_campaign_id()
+    base = _active_campaign_dir()
+    codex_dir = base / "codex" / "npcs"
+    npc_id = (npc_id or "").strip()
+    if not npc_id:
+        raise HTTPException(status_code=400, detail="npc_id required")
+    if "/" in npc_id or "\\" in npc_id or npc_id.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid npc_id")
+
+    json_path = codex_dir / f"{npc_id}.json"
+    if not json_path.exists():
+        alt = codex_dir / npc_id
+        if alt.exists() and alt.suffix.lower() == ".json":
+            json_path = alt
+            npc_id = alt.stem
+        else:
+            raise HTTPException(status_code=404, detail="npc dossier not found")
+
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"failed to read upload: {e}")
+    if not content:
+        raise HTTPException(status_code=400, detail="empty upload")
+
+    # extension based on upload filename
+    up_name = (file.filename or "").strip()
+    ext = Path(up_name).suffix.lower() if up_name else ".png"
+    if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
+        raise HTTPException(status_code=400, detail="only png/jpg/jpeg/webp allowed")
+
+    codex_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove any existing portrait with known extensions (npc scoped)
+    for old_ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        old = codex_dir / f"{npc_id}{old_ext}"
+        if old.exists() and old.is_file() and old_ext != ext:
+            _safe_unlink(old)
+
+    dst = codex_dir / f"{npc_id}{ext}"
+    tmp = codex_dir / f".{npc_id}{ext}.upload.tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(content)
+        tmp.replace(dst)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
+    # Update dossier image field to point to codex location
+    updated = None
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+        data["image"] = f"codex/npcs/{dst.name}"
+        data["updated_at"] = time.time()
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        updated = data
+    except Exception:
+        updated = None
+
+    # Return refreshed codex item
+    item = {
+        "id": npc_id,
+        "name": (updated or {}).get("name") or npc_id.replace("_", " ").strip().title(),
+        "json_filename": json_path.name,
+        "json_url": f"/campaigns/{camp_id}/codex/npcs/{json_path.name}",
+        "portrait": {"filename": dst.name, "url": f"/campaigns/{camp_id}/codex/npcs/{dst.name}", "source_dir": "codex/npcs"},
+        "dossier": updated,
+    }
+    return {"campaign": camp_id, "item": item}
+
+@router.post("/campaigns/codex/npcs/migrate-portraits")
+def migrate_npc_portraits(dry_run: bool = True, overwrite: bool = False):
+    """One-time helper: move legacy NPC portraits from assets/images into codex/npcs and update dossiers."""
+    camp_id = _get_active_campaign_id()
+    base = _active_campaign_dir()
+    codex_dir = base / "codex" / "npcs"
+    assets_dir = base / "assets" / "images"
+
+    if not codex_dir.exists():
+        return {"campaign": camp_id, "dry_run": dry_run, "migrated": [], "skipped": ["codex/npcs missing"]}
+
+    migrated: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    for jf in sorted(codex_dir.glob("*.json")):
+        dossier = _safe_read_json(jf)
+        if not isinstance(dossier, dict):
+            skipped.append({"npc": jf.name, "reason": "invalid json"})
+            continue
+
+        img = str(dossier.get("image") or "").strip()
+        if not img:
+            skipped.append({"npc": jf.name, "reason": "no image field"})
+            continue
+
+        src_name = Path(img).name
+        src = assets_dir / src_name
+        if not src.exists():
+            skipped.append({"npc": jf.name, "reason": "source not in assets/images"})
+            continue
+
+        dest = codex_dir / f"{jf.stem}{src.suffix.lower()}"
+        if dest.exists() and not overwrite:
+            skipped.append({"npc": jf.name, "reason": "dest exists", "dest": dest.name})
+            continue
+
+        action = {"npc": jf.stem, "from": f"assets/images/{src_name}", "to": f"codex/npcs/{dest.name}"}
+
+        if not dry_run:
+            try:
+                shutil.move(str(src), str(dest))
+                dossier["image"] = f"codex/npcs/{dest.name}"
+                with open(jf, "w", encoding="utf-8") as f:
+                    json.dump(dossier, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                skipped.append({"npc": jf.name, "reason": f"move failed: {e}"})
+                continue
+
+        migrated.append(action)
+
+    return {"campaign": camp_id, "dry_run": dry_run, "migrated": migrated, "skipped": skipped}
+
+
+
+@router.get("/campaigns/gallery/images")
+def gallery_images(limit: int = 250):
+    """Return image gallery metadata for the active campaign from /assets/images."""
+    camp_id = _get_active_campaign_id()
+    base = _active_campaign_dir()
+    assets_dir = base / "assets" / "images"
+
+    meta_map = _gallery_meta_map(assets_dir)
+
+    if not assets_dir.exists():
+        return {"campaign": camp_id, "items": []}
+
+    items: List[Dict[str, Any]] = []
+    try:
+        for p in assets_dir.iterdir():
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in _IMAGE_EXTS:
+                continue
+            st = p.stat()
+            meta = meta_map.get(p.name) if isinstance(meta_map, dict) else None
+            item = {
+                "filename": p.name,
+                "url": f"/campaigns/{camp_id}/assets/images/{p.name}",
+                "bytes": int(st.st_size),
+                "modified_epoch": int(st.st_mtime),
+            }
+            if isinstance(meta, dict):
+                # Keep this flat for the Portal
+                for k in ["kind", "prompt", "title", "created_at", "created_at_epoch", "created_by", "source", "npc_id", "tags", "context"]:
+                    if k in meta and meta.get(k) is not None:
+                        item[k] = meta.get(k)
+            items.append(item)
+    except Exception as e:
+        logger.error(f"Gallery scan error: {e}")
+        return {"campaign": camp_id, "items": []}
+
+    items.sort(key=lambda x: x.get("modified_epoch", 0), reverse=True)
+
+    if limit and limit > 0:
+        items = items[: min(int(limit), 2000)]
+
+    return {"campaign": camp_id, "items": items}
+
 # -----------------------------
 # 4. ENVIRONMENT VAULT (UNIVERSAL)
 # -----------------------------
@@ -264,21 +859,48 @@ def env_all_legacy():
 def _get_admin_pin() -> str:
     return dotenv_values(ENV_FILE).get("ADMIN_PIN", "").strip()
 
+# Global vault lock state (process-local). When a PIN exists, we start locked.
+_VAULT_LOCKED = True
+
 @router.get("/auth/status")
 def auth_status():
-    return {"locked": False, "has_pin": bool(_get_admin_pin())}
+    """Return lock status and whether a PIN is configured."""
+    global _VAULT_LOCKED
+    has_pin = bool(_get_admin_pin())
+    if not has_pin:
+        # No PIN configured -> nothing is protected.
+        _VAULT_LOCKED = False
+        return {"locked": False, "has_pin": False}
+    return {"locked": bool(_VAULT_LOCKED), "has_pin": True}
 
 @router.post("/auth/lock")
 def lock_vault():
-    return {"status": "success", "message": "Vault Locked"}
+    """Lock the vault (global across the API process)."""
+    global _VAULT_LOCKED
+    if not _get_admin_pin():
+        _VAULT_LOCKED = False
+        return {"ok": True, "locked": False}
+    _VAULT_LOCKED = True
+    return {"ok": True, "locked": True}
 
 @router.post("/auth/unlock")
 def unlock_vault(payload: Dict[str, Any] = Body(...)):
+    """Unlock the vault (global across the API process)."""
+    global _VAULT_LOCKED
     real_pin = _get_admin_pin()
     user_pin = str(payload.get("pin", "")).strip()
-    if not real_pin: return {"status": "success", "message": "Open Access"}
-    if user_pin == real_pin: return {"status": "success", "message": "Access Granted"}
+
+    if not real_pin:
+        # No PIN configured -> always unlocked.
+        _VAULT_LOCKED = False
+        return {"status": "success", "message": "Open Access", "locked": False}
+
+    if user_pin == real_pin:
+        _VAULT_LOCKED = False
+        return {"status": "success", "message": "Access Granted", "locked": False}
+
     raise HTTPException(401, "Invalid PIN")
+
 
 @router.post("/auth/verify")
 def verify_alias(payload: Dict[str, Any] = Body(...)):

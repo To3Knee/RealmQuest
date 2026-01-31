@@ -1,14 +1,14 @@
 //===============================================================
-//Script Name: App.jsx (v18.7 - Cognitive Control)
+//Script Name: App.jsx (v18.8 - Cortex Upgrade)
 //Script Location: /opt/RealmQuest/portal/src/App.jsx
-//Date: 2026-01-26
+//Date: 01/31/2026
 //Created By: T03KNEE
 //Github: https://github.com/To3Knee/RealmQuest
-//Version: 18.7.0
-//About: Added Cortex Tab for Memory Management & Soul Linking
+//Version: 18.8.21
+//About: Phase 3.8.4 - Vision Archive polish: remove title from thumbnail cards; avoid duplicate title in View modal; keep View+Delete only; no UI/theme drift.
 //===============================================================
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import axios from 'axios'
 import { 
   LayoutDashboard, Users, Mic2, Settings, Terminal, Play, 
@@ -16,26 +16,27 @@ import {
   ShieldAlert, Key, Activity, RefreshCw, Power, Database, X,
   Sword, Shield, Heart, Coins, FolderOpen, CheckCircle, Sparkles, Hammer, Map, Trash2,
   BookOpen, HelpCircle, Gift, UserPlus, Music, Radio, Dices, UserCircle, 
-  Image as ImageIcon, Scroll, Link as LinkIcon, Edit3, Send, Skull, Feather, Flame, Zap,
+  Image as ImageIcon, Scroll, Link as LinkIcon, Copy, Edit3, Send, Skull, Feather, Flame, Zap,
   Upload, ChevronDown, Repeat, Eraser, Crosshair, Headphones, Signal, CloudLightning,
   BrainCircuit, Eraser as WipeIcon, ShieldCheck
 } from 'lucide-react'
 
-// --- DYNAMIC CONNECTION (Fixes Port 8000/8001 mismatch) ---
-const getApiUrl = () => {
-    const host = window.location.hostname;
-    // Default to port 8000 based on docker-compose
-    return `http://${host}:8000`;
-};
-const API_URL = getApiUrl();
+// --- DYNAMIC CONNECTION --------------------------------------------------------
+// Prefer Vite env (Docker/Compose) and fall back to same-host :8000 for bare-metal dev
+const API_URL = (import.meta?.env?.VITE_API_URL) || `http://${window.location.hostname}:8000`;
+
+// NOTE: Keep `API_URL` as the ONLY base; never hardcode http://127.0.0.1 inside views.
+// ------------------------------------------------------------------------------
 
 // --- STYLING CONSTANTS ---
 const S = {
   card: "bg-[#0a0a0a]/90 backdrop-blur-md border border-[#333] rounded-xl p-6 shadow-2xl transition-all duration-300 hover:border-yellow-600/30",
   input: "w-full bg-black/50 border border-[#333] rounded-lg px-4 py-2 text-sm text-gray-200 focus:border-yellow-500 focus:outline-none focus:ring-1 focus:ring-yellow-500/50 transition-all font-mono",
+  textarea: "w-full bg-black/50 border border-[#333] rounded-lg px-4 py-2 text-sm text-gray-200 focus:border-yellow-500 focus:outline-none focus:ring-1 focus:ring-yellow-500/50 transition-all font-mono resize-none",
   editableText: "bg-transparent border-b border-transparent hover:border-[#333] focus:border-yellow-600 focus:outline-none transition-colors text-center w-full",
   btnPrimary: "bg-gradient-to-r from-yellow-700 to-yellow-600 text-black font-bold uppercase tracking-widest px-6 py-3 rounded shadow-[0_0_15px_rgba(202,138,4,0.3)] hover:scale-105 hover:shadow-[0_0_25px_rgba(202,138,4,0.5)] transition-all flex items-center justify-center gap-2 text-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
   btnSecondary: "bg-white/5 border border-white/10 text-gray-300 font-bold uppercase tracking-widest px-4 py-2 rounded hover:bg-white/10 hover:border-white/30 transition-all flex items-center justify-center gap-2 text-xs cursor-pointer",
+  btnDanger: "bg-gradient-to-r from-red-700 to-red-600 text-white font-bold uppercase tracking-widest px-4 py-2 rounded shadow-[0_0_15px_rgba(220,38,38,0.25)] hover:scale-105 hover:shadow-[0_0_25px_rgba(220,38,38,0.45)] transition-all flex items-center justify-center gap-2 text-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
   label: "block text-[10px] uppercase tracking-[0.2em] text-gray-500 font-bold mb-2",
   header: "font-cinematic text-3xl text-transparent bg-clip-text bg-gradient-to-r from-yellow-200 to-yellow-600 mb-8 drop-shadow-sm",
   sectionHeader: "font-cinematic text-xl text-white border-b border-[#333] pb-2 mb-4 flex items-center gap-2",
@@ -47,60 +48,86 @@ export default function App() {
   const [config, setConfig] = useState(null);
   const [logs, setLogs] = useState([]);
   const [systemHasPin, setSystemHasPin] = useState(false);
-  const [userIsAuthenticated, setUserIsAuthenticated] = useState(false);
+  const [vaultUnlocked, setVaultUnlocked] = useState(false);
   const [notification, setNotification] = useState(null);
 
   useEffect(() => {
+    let cancelled = false;
+
     const init = async () => {
         try {
             await axios.get(`${API_URL}/`);
-            setStatus("online");
-            // Check auth status (if endpoint exists)
-	            try {
-	                const authRes = await axios.get(`${API_URL}/system/auth/status`);
-	                // `locked` => whether the UI should be blocked; `has_pin` => whether a PIN is configured.
-	                setSystemHasPin(!!authRes.data?.has_pin);
-	                setUserIsAuthenticated(!authRes.data?.locked);
-	            } catch (e) { console.warn("Auth check failed, skipping lock"); }
-            
-            refreshData();
-        } catch (e) { 
-           console.error("API Connection Failed", e);
-           setStatus("offline"); 
+            if (!cancelled) setStatus("online");
+
+            await refreshAuth();
+            await refreshData();
+        } catch (e) {
+            console.error("API Connection Failed", e);
+            if (!cancelled) setStatus("offline");
         }
     };
-    init();
-    const interval = setInterval(init, 10000);
-    return () => clearInterval(interval);
-  }, []);
 
-  const refreshData = async () => {
-      try {
+    init();
+
+    const interval = setInterval(() => {
+        refreshData();
+        refreshAuth();
+    }, 10000);
+
+    return () => {
+        cancelled = true;
+        clearInterval(interval);
+    };
+}, []);
+
+  const refreshAuth = useCallback(async () => {
+    try {
+        const authRes = await axios.get(`${API_URL}/system/auth/status`);
+        const hasPin = !!authRes.data?.has_pin;
+        const locked = !!authRes.data?.locked;
+
+        setSystemHasPin(hasPin);
+        setVaultUnlocked(!locked);
+    } catch (e) {
+        // If auth endpoint is unavailable, treat as no-pin/unlocked so the portal still works.
+        setSystemHasPin(false);
+        setVaultUnlocked(true);
+    }
+}, []);
+
+const refreshData = useCallback(async () => {
+    try {
         const confRes = await axios.get(`${API_URL}/system/config`);
         setConfig(confRes.data);
-      } catch (e) { console.error("Config Sync error", e); }
-  };
+    } catch (e) {
+        console.error("Config Sync error", e);
+    }
+}, []);
 
   const addLog = (source, message) => {
     const ts = new Date().toLocaleTimeString([], { hour12: false });
     setLogs(prev => [`[${ts}] [${source}] ${message}`, ...prev].slice(0, 50));
   };
-
   const notify = (msg, type = "info") => {
       setNotification({ msg, type });
       setTimeout(() => setNotification(null), 3000);
   };
 
-  const showLockScreen = activeTab === 'settings' && systemHasPin && !userIsAuthenticated;
+  const lockExcluded = new Set(['player','chars']);
+
+  const tabRequiresUnlock = systemHasPin && !lockExcluded.has(activeTab);
+  const showLockScreen = tabRequiresUnlock && !vaultUnlocked;
 
   return (
     <div className="flex h-screen bg-[#050505] text-gray-200 font-sans selection:bg-yellow-600 selection:text-black overflow-hidden relative">
+      <ModalHost />
+      
       <aside className="w-80 border-r border-[#222] bg-[#080808] flex flex-col relative z-20 shadow-[5px_0_30px_rgba(0,0,0,0.5)]">
         <div className="p-8 pb-6 border-b border-[#111]">
           <h1 className="font-cinematic text-3xl font-bold tracking-widest text-white drop-shadow-[0_0_10px_rgba(255,255,255,0.2)]">REALM<span className="text-yellow-600">QUEST</span></h1>
           <div className="mt-4 flex items-center gap-3 text-[10px] font-mono tracking-[0.2em] uppercase text-gray-600">
              <div className={`w-2 h-2 rounded-full ${status === 'online' ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' 
-             : 'bg-red-500 animate-pulse'}`} /><span>v18.7.0 // {status}</span>
+             : 'bg-red-500 animate-pulse'}`} /><span>v18.8.0 // {status}</span>
           </div>
         </div>
         <nav className="flex-1 px-6 space-y-2 mt-8 overflow-y-auto custom-scrollbar">
@@ -113,7 +140,7 @@ export default function App() {
           
           <div className="relative group">
             <NavBtn icon={Settings} label="Neural Config" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
-            {systemHasPin && <Lock size={14} className={`absolute right-4 top-4 ${userIsAuthenticated ?
+            {systemHasPin && <Lock size={14} className={`absolute right-4 top-4 ${vaultUnlocked ?
               "text-green-500/50" : "text-yellow-600/50"}`} />}
           </div>
           
@@ -126,16 +153,52 @@ export default function App() {
         <div className="absolute top-[-300px] right-[-100px] w-[800px] h-[800px] bg-yellow-600/5 rounded-full blur-[150px] pointer-events-none" />
         <header className="h-20 border-b border-white/5 flex items-center justify-between px-10 bg-[#0a0a0a]/50 backdrop-blur-sm z-10">
             <h2 className="text-lg font-light tracking-[0.2em] text-gray-400 font-cinematic uppercase">// {showLockScreen ? 'Security Protocol Active' : activeTab}</h2>
+            {systemHasPin && !lockExcluded.has(activeTab) && vaultUnlocked && !showLockScreen && (
+                <button
+                    type="button"
+                    className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs border border-zinc-700"
+                    title="Lock administrative pages"
+                    onClick={async () => {
+                        try {
+                            await axios.post(`${API_URL}/system/auth/lock`);
+                            setVaultUnlocked(false);
+                            await refreshAuth();
+                            notify("Vault locked.");
+                        } catch (e) {
+                            console.error("Lock error", e);
+                            // Auth failures must never crash the portal.
+                            notify("Failed to lock vault.", "error");
+                        }
+                    }}
+                >
+                    <Lock size={14} />
+                    Seal Vault
+                </button>
+            )}
+
         </header>
         
         <div className="flex-1 overflow-auto p-10 relative z-10 custom-scrollbar">
-           {activeTab === 'overview' && <OverviewView config={config} logs={logs} addLog={addLog} onRefresh={refreshData} notify={notify} />}
+           {showLockScreen ? (
+              <LockScreen
+                onUnlock={async () => {
+                  setVaultUnlocked(true);
+                  await refreshAuth();
+                }}
+                notify={notify}
+              />
+           ) : (
+              <>
+{activeTab === 'overview' && <OverviewView config={config} logs={logs} addLog={addLog} onRefresh={refreshData} notify={notify} />}
            {activeTab === 'cortex' && <CortexView notify={notify} />}
            {activeTab === 'player' && <PlayerPortalView notify={notify} addLog={addLog} />}
-           {activeTab === 'settings' && (showLockScreen ? <LockScreen onUnlock={() => setUserIsAuthenticated(true)} notify={notify} /> : <ConfigView onUpdate={refreshData} notify={notify} showLogout={systemHasPin && userIsAuthenticated} onLogout={async () => { await axios.post(`${API_URL}/system/auth/lock`); setUserIsAuthenticated(false); notify("Vault Locked"); }} />)}
+           {activeTab === 'settings' && <ConfigView onUpdate={refreshData} notify={notify} showLogout={systemHasPin && vaultUnlocked} onLogout={async () => { try { await axios.post(`${API_URL}/system/auth/lock`); setVaultUnlocked(false); await refreshAuth(); notify("Vault Locked"); } catch (e) { console.error("Lock error", e); notify("Failed to lock vault.", "error"); } }} />}
            {activeTab === 'audio' && <AudioMatrix config={config} onUpdate={refreshData} notify={notify} />}
            {activeTab === 'chars' && <CharacterMatrix addLog={addLog} notify={notify} />}
            {activeTab === 'logs' && <SystemLogsView notify={notify} />}
+              </>
+           )}
+
         </div>
       </main>
 
@@ -151,16 +214,207 @@ export default function App() {
   )
 }
 
+
+// === GLOBAL MODALS (NO BROWSER POPUPS) ========================================
+// We keep modals centralized so any view can request confirmation/input without
+// using window.confirm / window.prompt (which breaks immersion and UX).
+let __rqConfirmFn = null;
+let __rqPromptFn = null;
+
+export async function rqConfirm(opts = {}) {
+  if (typeof __rqConfirmFn === "function") return await __rqConfirmFn(opts);
+  // If host isn't mounted yet, fail closed (safer than accidental deletes)
+  return false;
+}
+
+export async function rqPrompt(opts = {}) {
+  if (typeof __rqPromptFn === "function") return await __rqPromptFn(opts);
+  return null;
+}
+
+function ModalHost() {
+  const [confirmState, setConfirmState] = useState({ open: false, opts: null });
+  const confirmResolveRef = useRef(null);
+
+  const [promptState, setPromptState] = useState({ open: false, opts: null, value: "" });
+  const promptResolveRef = useRef(null);
+
+  const openConfirm = useCallback((opts = {}) => {
+    return new Promise((resolve) => {
+      confirmResolveRef.current = resolve;
+      setConfirmState({
+        open: true,
+        opts: {
+          title: opts.title ?? "Confirm",
+          message: opts.message ?? "Are you sure?",
+          confirmText: opts.confirmText ?? "Confirm",
+          cancelText: opts.cancelText ?? "Cancel",
+          danger: !!opts.danger,
+        },
+      });
+    });
+  }, []);
+
+  const closeConfirm = useCallback((result) => {
+    setConfirmState({ open: false, opts: null });
+    if (confirmResolveRef.current) confirmResolveRef.current(!!result);
+    confirmResolveRef.current = null;
+  }, []);
+
+  const openPrompt = useCallback((opts = {}) => {
+    return new Promise((resolve) => {
+      promptResolveRef.current = resolve;
+      setPromptState({
+        open: true,
+        opts: {
+          title: opts.title ?? "Input Required",
+          message: opts.message ?? "",
+          label: opts.label ?? "Value",
+          placeholder: opts.placeholder ?? "",
+          defaultValue: opts.defaultValue ?? "",
+          confirmText: opts.confirmText ?? "Create",
+          cancelText: opts.cancelText ?? "Cancel",
+          danger: !!opts.danger,
+        },
+        value: (opts.defaultValue ?? "").toString(),
+      });
+    });
+  }, []);
+
+  const closePrompt = useCallback((valueOrNull) => {
+    setPromptState({ open: false, opts: null, value: "" });
+    if (promptResolveRef.current) promptResolveRef.current(valueOrNull);
+    promptResolveRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    __rqConfirmFn = openConfirm;
+    __rqPromptFn = openPrompt;
+    return () => {
+      __rqConfirmFn = null;
+      __rqPromptFn = null;
+    };
+  }, [openConfirm, openPrompt]);
+
+  // Shared modal chrome
+  const Backdrop = ({ children }) => (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 px-4">
+      <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-obsidian/95 shadow-2xl">
+        {children}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      {confirmState.open && confirmState.opts && (
+        <Backdrop>
+          <div className="p-6">
+            <div className="text-lg font-black tracking-wide text-gray-100">
+              {confirmState.opts.title}
+            </div>
+            <div className="mt-2 text-sm text-gray-400 whitespace-pre-line">
+              {confirmState.opts.message}
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-3">
+              <button
+                onClick={() => closeConfirm(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest text-gray-300 bg-white/5 hover:bg-white/10"
+              >
+                {confirmState.opts.cancelText}
+              </button>
+              <button
+                onClick={() => closeConfirm(true)}
+                className={`px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest ${
+                  confirmState.opts.danger
+                    ? "text-red-200 bg-red-500/20 hover:bg-red-500/30 border border-red-500/30"
+                    : "text-yellow-200 bg-yellow-500/20 hover:bg-yellow-500/30 border border-yellow-500/30"
+                }`}
+              >
+                {confirmState.opts.confirmText}
+              </button>
+            </div>
+          </div>
+        </Backdrop>
+      )}
+
+      {promptState.open && promptState.opts && (
+        <Backdrop>
+          <div className="p-6">
+            <div className="text-lg font-black tracking-wide text-gray-100">
+              {promptState.opts.title}
+            </div>
+
+            {promptState.opts.message ? (
+              <div className="mt-2 text-sm text-gray-400 whitespace-pre-line">
+                {promptState.opts.message}
+              </div>
+            ) : null}
+
+            <div className="mt-4">
+              <div className="text-[11px] font-bold uppercase tracking-widest text-gray-500">
+                {promptState.opts.label}
+              </div>
+              <input
+                autoFocus
+                value={promptState.value}
+                onChange={(e) => setPromptState((s) => ({ ...s, value: e.target.value }))}
+                placeholder={promptState.opts.placeholder}
+                className="mt-2 w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-sm text-gray-100 placeholder:text-gray-600 outline-none focus:border-yellow-500/40"
+              />
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-3">
+              <button
+                onClick={() => closePrompt(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest text-gray-300 bg-white/5 hover:bg-white/10"
+              >
+                {promptState.opts.cancelText}
+              </button>
+              <button
+                onClick={() => {
+                  const v = (promptState.value ?? "").toString().trim();
+                  if (!v) return;
+                  closePrompt(v);
+                }}
+                className={`px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest ${
+                  promptState.opts.danger
+                    ? "text-red-200 bg-red-500/20 hover:bg-red-500/30 border border-red-500/30"
+                    : "text-yellow-200 bg-yellow-500/20 hover:bg-yellow-500/30 border border-yellow-500/30"
+                }`}
+              >
+                {promptState.opts.confirmText}
+              </button>
+            </div>
+          </div>
+        </Backdrop>
+      )}
+    </>
+  );
+}
+// ============================================================================
+
 // -------------------------------------------------------------------------
-// --- 0. CORTEX VIEW (BRAIN MANAGEMENT) ---
+// --- 0. CORTEX VIEW (ENHANCED: SURGICAL MEMORY TOOLS) ---
 // -------------------------------------------------------------------------
 function CortexView({ notify }) {
+    const [subTab, setSubTab] = useState("stream"); // stream | inject | art
     const [memory, setMemory] = useState([]);
     const [systemPrompt, setSystemPrompt] = useState("");
     const [stats, setStats] = useState({ tokens: 0, turns: 0 });
 
+    // Injection State
+    const [loreText, setLoreText] = useState("");
+    const [loreCat, setLoreCat] = useState("world_building");
+    
+    // Art State
+    const [artConfig, setArtConfig] = useState({ style: "", negative_prompt: "" });
+    const [artConfigSupported, setArtConfigSupported] = useState(true);
+
     useEffect(() => {
         fetchBrainData();
+        fetchArtConfig();
         const int = setInterval(fetchBrainData, 5000);
         return () => clearInterval(int);
     }, []);
@@ -174,13 +428,45 @@ function CortexView({ notify }) {
         } catch (e) {}
     };
 
+    const fetchArtConfig = async () => {
+        if (!artConfigSupported) return;
+        try {
+            const res = await axios.get(`${API_URL}/system/cortex/art/config`);
+            if (res?.data) setArtConfig(res.data);
+        } catch (e) {
+            const status = e?.response?.status;
+            // This endpoint may not exist in some builds; silence it to avoid log spam.
+            if (status === 404) {
+                setArtConfigSupported(false);
+            }
+        }
+    };
+
+    // --- ACTIONS ---
+    
     const wipeMemory = async () => {
-        if(!confirm("⚠️ WIPE ALL AI SHORT-TERM MEMORY? This cannot be undone.")) return;
+        if (!(await rqConfirm({ title: "Wipe Memory", message: "⚠️ WIPE ALL AI SHORT-TERM MEMORY?\n\nThis cannot be undone.", confirmText: "Wipe", cancelText: "Cancel", danger: true }))) return;
         try {
             await axios.post(`${API_URL}/game/brain/wipe`);
             notify("Memory Formatted");
             fetchBrainData();
         } catch (e) { notify("Wipe Failed", "error"); }
+    };
+    
+    // SURGICAL DELETE (Placeholder until /game/brain/delete is mapped)
+    const deleteMemory = async (index) => {
+        if (!(await rqConfirm({ title: "Delete Memory Item", message: "Surgically remove this thought?", confirmText: "Delete", cancelText: "Cancel", danger: true }))) return;
+        // NOTE: Since we don't have the chat_engine code to add the DELETE endpoint yet,
+        // we simulate it or call the future endpoint. 
+        // For now, let's notify the user this is ready for the backend hook.
+        try {
+             // await axios.delete(`${API_URL}/game/brain/memory/${index}`);
+             notify("Surgical Scalpel applied (Backend Hook Pending)");
+             // Optimistic update for UI feel
+             const newMem = [...memory];
+             newMem.splice(index, 1);
+             setMemory(newMem);
+        } catch(e) { notify("Surgical Error", "error"); }
     };
 
     const updatePrompt = async () => {
@@ -188,6 +474,22 @@ function CortexView({ notify }) {
             await axios.post(`${API_URL}/game/brain/prompt`, { prompt: systemPrompt });
             notify("Guardrails Updated");
         } catch (e) { notify("Update Failed", "error"); }
+    };
+
+    const injectLore = async () => {
+        if(!loreText) return;
+        try {
+            await axios.post(`${API_URL}/system/cortex/inject`, { content: loreText, category: loreCat });
+            notify("Lore Injected into Vector DB");
+            setLoreText("");
+        } catch(e) { notify("Injection Failed", "error"); }
+    };
+
+    const saveArtConfig = async () => {
+        try {
+            await axios.post(`${API_URL}/system/cortex/art/config`, artConfig);
+            notify("Art Director Settings Saved");
+        } catch(e) { notify("Save Failed", "error"); }
     };
 
     return (
@@ -199,13 +501,18 @@ function CortexView({ notify }) {
                         COGNITIVE LOAD: <span className="text-yellow-500 font-bold">{stats.tokens} TOKENS</span> // TURNS: {stats.turns}
                     </p>
                 </div>
-                <button onClick={wipeMemory} className="bg-red-900/20 border border-red-500/50 text-red-500 px-4 py-2 rounded hover:bg-red-500 hover:text-white transition-all text-xs font-bold uppercase tracking-widest flex items-center gap-2">
-                    <WipeIcon size={14} /> Wipe Memory
-                </button>
+                {/* SUB TABS */}
+                <div className="flex bg-white/5 rounded p-1 border border-white/10">
+                    {['stream', 'inject', 'art'].map(t => (
+                        <button key={t} onClick={() => setSubTab(t)} className={`px-4 py-2 text-xs font-bold uppercase rounded transition-all ${subTab === t ? 'bg-yellow-600 text-black shadow-lg' : 'text-gray-400 hover:text-white'}`}>
+                            {t}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                {/* SYSTEM PROMPT / GUARDRAILS */}
+                {/* LEFT COLUMN: CONTROLS */}
                 <div className={`${S.card} lg:col-span-1 flex flex-col`}>
                     <h3 className={S.sectionHeader}><ShieldCheck size={18}/> Active Guardrails</h3>
                     <p className="text-xs text-gray-500 mb-4">The core instructions driving the DM persona.</p>
@@ -214,27 +521,117 @@ function CortexView({ notify }) {
                         value={systemPrompt}
                         onChange={(e) => setSystemPrompt(e.target.value)}
                     />
-                    <button onClick={updatePrompt} className={S.btnPrimary}><Save size={14}/> Update Guardrails</button>
+                    <div className="flex flex-col gap-2">
+                        <button onClick={updatePrompt} className={S.btnPrimary}><Save size={14}/> Update Guardrails</button>
+                        <button onClick={wipeMemory} className="w-full py-3 bg-red-900/20 border border-red-500/30 text-red-500 rounded hover:bg-red-500 hover:text-white transition-all text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2">
+                            <WipeIcon size={14} /> Wipe All Memory
+                        </button>
+                    </div>
                 </div>
 
-                {/* CONVERSATION HISTORY */}
+                {/* RIGHT COLUMN: DYNAMIC CONTENT */}
                 <div className={`${S.card} lg:col-span-2 flex flex-col`}>
-                    <h3 className={S.sectionHeader}><Activity size={18}/> Cognitive Stream (Short-Term Memory)</h3>
-                     <div className="flex-1 bg-black/50 border border-[#333] rounded p-4 overflow-auto custom-scrollbar space-y-4 max-h-[500px]">
-                        {memory.length === 0 && <div className="text-center text-gray-600 text-xs py-10">Memory Empty (Tabula Rasa)</div>}
-                        {memory.map((m, i) => (
-                            <div key={i} className={`flex gap-4 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[80%] p-3 rounded border text-xs leading-relaxed ${
-                                    m.role === 'user' 
-                                    ? 'bg-blue-900/10 border-blue-500/30 text-blue-200 rounded-tr-none' 
-                                    : 'bg-yellow-900/10 border-yellow-600/30 text-yellow-100 rounded-tl-none'
-                                }`}>
-                                    <div className="text-[9px] font-bold uppercase tracking-widest opacity-50 mb-1">{m.role}</div>
-                                    {m.content}
+                    
+                    {/* VIEW 1: MEMORY STREAM (With Surgical Delete) */}
+                    {subTab === 'stream' && (
+                        <>
+                            <h3 className={S.sectionHeader}><Activity size={18}/> Cognitive Stream</h3>
+                            <div className="flex-1 bg-black/50 border border-[#333] rounded p-4 overflow-auto custom-scrollbar space-y-4 max-h-[600px]">
+                                {memory.length === 0 && <div className="text-center text-gray-600 text-xs py-10">Memory Empty (Tabula Rasa)</div>}
+                                {memory.map((m, i) => (
+                                    <div key={i} className={`flex gap-4 group ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                        {/* AI DELETE BUTTON */}
+                                        {m.role !== 'user' && (
+                                            <button onClick={() => deleteMemory(i)} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-400 p-2"><Trash2 size={12}/></button>
+                                        )}
+                                        
+                                        <div className={`max-w-[80%] p-3 rounded border text-xs leading-relaxed ${
+                                            m.role === 'user' 
+                                            ? 'bg-blue-900/10 border-blue-500/30 text-blue-200 rounded-tr-none' 
+                                            : 'bg-yellow-900/10 border-yellow-600/30 text-yellow-100 rounded-tl-none'
+                                        }`}>
+                                            <div className="text-[9px] font-bold uppercase tracking-widest opacity-50 mb-1">{m.role}</div>
+                                            {m.content}
+                                        </div>
+
+                                        {/* USER DELETE BUTTON */}
+                                        {m.role === 'user' && (
+                                            <button onClick={() => deleteMemory(i)} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-400 p-2"><Trash2 size={12}/></button>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </>
+                    )}
+
+                    {/* VIEW 2: LORE INJECTION */}
+                    {subTab === 'inject' && (
+                        <div className="animate-fade-in h-full flex flex-col">
+                            <h3 className={S.sectionHeader}><BrainCircuit size={18}/> Lore Injection</h3>
+                            <p className="text-xs text-gray-500 mb-6">Manually insert facts into the Vector Database. The AI will recall this context forever.</p>
+                            
+                            <div className="mb-4">
+                                <label className={S.label}>Category / Tag</label>
+                                <select className={S.input} value={loreCat} onChange={e => setLoreCat(e.target.value)}>
+                                    <option value="world_building">World Building</option>
+                                    <option value="npc_bio">NPC Biography</option>
+                                    <option value="quest_log">Quest Log</option>
+                                    <option value="rules">House Rules</option>
+                                </select>
+                            </div>
+
+                            <div className="flex-1 mb-4">
+                                <label className={S.label}>Lore Content</label>
+                                <textarea 
+                                    className="w-full h-full bg-black/50 border border-[#333] rounded p-4 font-mono text-sm text-white focus:border-yellow-600 focus:outline-none resize-none"
+                                    placeholder="e.g., The collision stone glows blue when orcs are nearby..."
+                                    value={loreText}
+                                    onChange={e => setLoreText(e.target.value)}
+                                />
+                            </div>
+
+                            <button onClick={injectLore} disabled={!loreText} className={S.btnPrimary}>
+                                <Upload size={16} /> Inject Memory
+                            </button>
+                        </div>
+                    )}
+
+                    {/* VIEW 3: ART DIRECTOR */}
+                    {subTab === 'art' && (
+                         <div className="animate-fade-in h-full flex flex-col">
+                            <h3 className={S.sectionHeader}><Palette size={18}/> Art Director</h3>
+                            <p className="text-xs text-gray-500 mb-6">Configure the default parameters for image generation.</p>
+
+                            <div className="space-y-6">
+                                <div>
+                                    <label className={S.label}>Base Style Prompt (Prefix)</label>
+                                    <textarea 
+                                        className={S.input + " min-h-[100px]"}
+                                        value={artConfig.style}
+                                        onChange={e => setArtConfig({...artConfig, style: e.target.value})}
+                                        placeholder="e.g., Cinematic fantasy oil painting, 8k resolution, dramatic lighting..."
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className={S.label}>Negative Prompt (Avoid)</label>
+                                    <textarea 
+                                        className={S.input + " min-h-[100px] border-red-900/30 focus:border-red-500"}
+                                        value={artConfig.negative_prompt}
+                                        onChange={e => setArtConfig({...artConfig, negative_prompt: e.target.value})}
+                                        placeholder="e.g., blurry, text, watermark, bad anatomy, modern cars..."
+                                    />
                                 </div>
                             </div>
-                        ))}
-                     </div>
+                            
+                            <div className="mt-auto pt-6">
+                                <button onClick={saveArtConfig} className={S.btnPrimary + " w-full"}>
+                                    <Save size={16} /> Save Art Config
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
                 </div>
             </div>
         </div>
@@ -244,7 +641,7 @@ function CortexView({ notify }) {
 // -------------------------------------------------------------------------
 // --- 1. OVERVIEW (COMMAND CENTER) ---
 // -------------------------------------------------------------------------
-function OverviewView({ config, logs, addLog, onRefresh, notify }) {
+function OverviewView({ config, logs = [], addLog, onRefresh, notify }) {
     const [logModal, setLogModal] = useState(null);
     const [campaignModal, setCampaignModal] = useState(false);
     const [discordMembers, setDiscordMembers] = useState([]);
@@ -283,7 +680,7 @@ function OverviewView({ config, logs, addLog, onRefresh, notify }) {
     };
     
     const restartAll = async () => { 
-        if(!confirm("Restart ENTIRE Stack?")) return;
+        if (!(await rqConfirm({ title: "Restart Stack", message: "Restart ENTIRE Stack?", confirmText: "Restart", cancelText: "Cancel", danger: true }))) return;
         addLog("SYS", "⚠️ INITIATING FULL STACK RESTART"); 
         ["bot", "api", "kenku", "scribe", "chroma", "mongo", "redis", "portal"].forEach(s => restart(s)); 
     };
@@ -337,7 +734,7 @@ function OverviewView({ config, logs, addLog, onRefresh, notify }) {
                     <div className={`${S.card} relative overflow-hidden h-[300px] flex flex-col`}>
                         <h3 className="text-yellow-600 font-mono text-xs uppercase tracking-widest mb-4 flex items-center gap-2"><Terminal size={14} /> Command Log</h3>
                         <div className="flex-1 bg-black/40 rounded border border-white/5 p-4 font-mono text-[10px] text-gray-400 overflow-auto custom-scrollbar">
-                            {logs.map((log, i) => (<div key={i} className="mb-2 border-l-2 border-yellow-900/30 pl-3 hover:bg-white/5"><span className="text-yellow-600 mr-2">{log.split(']')[0]}]</span><span className={log.includes("ERR") ? "text-red-400" : "text-gray-300"}>{log.split(']').slice(1).join(']')}</span></div>))}
+                            {(logs || []).map((log, i) => (<div key={i} className="mb-2 border-l-2 border-yellow-900/30 pl-3 hover:bg-white/5"><span className="text-yellow-600 mr-2">{log.split(']')[0]}]</span><span className={log.includes("ERR") ? "text-red-400" : "text-gray-300"}>{log.split(']').slice(1).join(']')}</span></div>))}
                         </div>
                     </div>
                 </div>
@@ -624,7 +1021,7 @@ function ConfigView({ onUpdate, notify, showLogout = false, onLogout }) {
     const toggleVis = (k) => setVisible(p => ({...p, [k]: !p[k]}));
     
     const handleDelete = async (key) => {
-        if(confirm(`Delete ${key} from .env? This cannot be undone.`)) {
+        if (await rqConfirm({ title: "Delete Variable", message: `Delete ${key} from .env?\n\nThis cannot be undone.`, confirmText: "Delete", cancelText: "Cancel", danger: true })) {
             try {
                 await axios.delete(`${API_URL}/system/env/${key}`);
                 setEnvData(prev => prev.filter(item => item.key !== key));
@@ -799,59 +1196,223 @@ function SystemLogsView({ notify }) {
 // --- 5. PLAYER PORTAL (PRESERVED v17.0) ---
 // -------------------------------------------------------------------------
 function PlayerPortalView({ notify, addLog }) {
-    // STARTING DATA (Would be fetched from API in real usage)
     const [selectedChar, setSelectedChar] = useState(null);
-    const [view, setView] = useState("sheet"); 
-    
-    // MOCK LOBBY
-    const availableChars = [
-        { id: 1, name: "Valerius The Void", class_name: "Warlock", level: 5, race: "Human", hp: "34", hp_max: "42", ac: "14", init: "+2", speed: "30", stats: { STR: 10, DEX: 14, CON: 16, INT: 12, WIS: 10, CHA: 18 } },
-        { id: 2, name: "Kaelen Stonefist", class_name: "Paladin", level: 5, race: "Dwarf", hp: "45", hp_max: "45", ac: "18", init: "0", speed: "25", stats: { STR: 16, DEX: 10, CON: 16, INT: 8, WIS: 12, CHA: 14 } },
-        { id: 3, name: "Elara Moonwhisper", class_name: "Rogue", level: 4, race: "Elf", hp: "28", hp_max: "28", ac: "15", init: "+4", speed: "35", stats: { STR: 8, DEX: 18, CON: 12, INT: 14, WIS: 12, CHA: 12 } }
-    ];
+    const [view, setView] = useState("sheet");
+
+    // Local-first lobby (Phase 4 will persist to backend)
+    const [availableChars, setAvailableChars] = useState([]);
+    const [loadingChars, setLoadingChars] = useState(true);
+
+    const importRef = useRef(null);
+
+    // Create Hero Modal state
+    const [showCreateHero, setShowCreateHero] = useState(false);
+    const [createDraft, setCreateDraft] = useState({ name: "", class_name: "", race: "", level: 1 });
+    const [creatingHero, setCreatingHero] = useState(false);
+
+    // A cinematic starter roster so the Player Portal is usable immediately
+    useEffect(() => {
+        const starter = [
+            { id: "starter_valerius", name: "Valerius The Void", class_name: "Warlock", level: 5, race: "Human", hp: "34", hp_max: "42", ac: "14", init: "+2", speed: "30", stats: { STR: 10, DEX: 14, CON: 16, INT: 12, WIS: 10, CHA: 18 } },
+            { id: "starter_kaelen", name: "Kaelen Stonefist", class_name: "Paladin", level: 5, race: "Dwarf", hp: "45", hp_max: "45", ac: "18", init: "0", speed: "25", stats: { STR: 16, DEX: 10, CON: 16, INT: 8, WIS: 12, CHA: 14 } },
+            { id: "starter_elara", name: "Elara Moonwhisper", class_name: "Rogue", level: 4, race: "Elf", hp: "28", hp_max: "28", ac: "15", init: "+4", speed: "35", stats: { STR: 8, DEX: 18, CON: 12, INT: 14, WIS: 12, CHA: 12 } }
+        ];
+        setAvailableChars(starter);
+        setLoadingChars(false);
+    }, []);
+
+    const normalizeChar = (c) => {
+        if (!c) return null;
+        return {
+            ...c,
+            id: c.id || c.character_id || `hero_${Date.now()}`,
+            level: Number(c.level || 1),
+        };
+    };
+
+    const openCreateHero = () => {
+        setCreateDraft({ name: "", class_name: "", race: "", level: 1 });
+        setShowCreateHero(true);
+    };
+
+    const closeCreateHero = () => setShowCreateHero(false);
+
+    const createHero = async () => {
+        const name = (createDraft.name || "").trim();
+        if (!name) {
+            notify?.("Hero name required.", "error");
+            return;
+        }
+        setCreatingHero(true);
+        try {
+            const hero = normalizeChar({
+                id: `hero_${Date.now()}`,
+                name,
+                class_name: (createDraft.class_name || "").trim(),
+                race: (createDraft.race || "").trim(),
+                level: Number(createDraft.level || 1),
+                hp: "0",
+                hp_max: "0",
+                ac: "10",
+                init: "0",
+                speed: "30",
+                stats: { STR: 10, DEX: 10, CON: 10, INT: 10, WIS: 10, CHA: 10 }
+            });
+
+            setAvailableChars(prev => [hero, ...prev]);
+            setSelectedChar(hero);
+            setView("sheet");
+            notify?.("Hero forged.", "info");
+            addLog?.("PLAYER", `Hero created: ${hero.name}`);
+        } finally {
+            setCreatingHero(false);
+            setShowCreateHero(false);
+        }
+    };
+
+    const handleImportClick = () => {
+        if (importRef.current) importRef.current.value = "";
+        importRef.current?.click();
+    };
+
+    const handleImportFile = async (e) => {
+        const file = e?.target?.files?.[0];
+        if (!file) return;
+
+        try {
+            const text = await file.text();
+            const parsed = JSON.parse(text);
+
+            // Accept either a single hero object or a wrapper like { hero: {...} }
+            const heroRaw =
+                parsed?.hero ? parsed.hero :
+                parsed?.character ? parsed.character :
+                parsed;
+
+            if (!heroRaw || typeof heroRaw !== "object") throw new Error("Invalid hero JSON.");
+
+            const hero = normalizeChar({
+                ...heroRaw,
+                id: heroRaw.id || heroRaw.character_id || `import_${Date.now()}`
+            });
+
+            if (!hero.name) {
+                notify?.("Imported hero JSON missing name.", "error");
+                return;
+            }
+
+            setAvailableChars(prev => [hero, ...prev]);
+            setSelectedChar(hero);
+            setView("sheet");
+            notify?.("Hero imported.", "info");
+            addLog?.("PLAYER", `Hero imported: ${hero.name}`);
+        } catch (err) {
+            console.error(err);
+            notify?.("Failed to import hero JSON.", "error");
+        }
+    };
+
+    const createHeroModal = showCreateHero ? (
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+            <div className="w-[92vw] max-w-xl bg-[#0a0a0a]/95 border border-white/10 rounded-2xl shadow-2xl p-6 relative overflow-hidden">
+                <div className="absolute inset-0 bg-yellow-600/5 blur-2xl pointer-events-none" />
+                <div className="relative">
+                    <div className="flex items-start justify-between gap-4">
+                        <div>
+                            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-yellow-500">
+                                <Sparkles size={14} /> Forge New Hero
+                            </div>
+                            <div className="text-gray-500 font-mono text-xs tracking-widest mt-1">LOCAL ONLY (PERSISTENCE IN PHASE 4)</div>
+                        </div>
+                        <button onClick={closeCreateHero} className="text-gray-500 hover:text-white transition-colors">
+                            <X size={18} />
+                        </button>
+                    </div>
+
+                    <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="md:col-span-2">
+                            <label className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">Hero Name</label>
+                            <input value={createDraft.name} onChange={(e) => setCreateDraft(prev => ({ ...prev, name: e.target.value }))} className={S.input} placeholder="e.g., Kaldor Grimwarden" />
+                        </div>
+                        <div>
+                            <label className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">Class</label>
+                            <input value={createDraft.class_name} onChange={(e) => setCreateDraft(prev => ({ ...prev, class_name: e.target.value }))} className={S.input} placeholder="Paladin" />
+                        </div>
+                        <div>
+                            <label className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">Race</label>
+                            <input value={createDraft.race} onChange={(e) => setCreateDraft(prev => ({ ...prev, race: e.target.value }))} className={S.input} placeholder="Human" />
+                        </div>
+                        <div>
+                            <label className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">Level</label>
+                            <input type="number" min={1} max={20} value={createDraft.level} onChange={(e) => setCreateDraft(prev => ({ ...prev, level: Number(e.target.value || 1) }))} className={S.input} />
+                        </div>
+                        <div className="flex items-end">
+                            <button disabled={creatingHero} onClick={createHero} className={`${S.btnPrimary} w-full justify-center ${creatingHero ? "opacity-60 cursor-not-allowed" : ""}`}>
+                                <UserPlus size={14}/> {creatingHero ? "Forging..." : "Create Hero"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    ) : null;
 
     if (!selectedChar) {
         return (
             <div className="h-full flex flex-col items-center justify-center animate-fade-in">
+                <input type="file" ref={importRef} className="hidden" accept="application/json" onChange={handleImportFile} />
+                {createHeroModal}
+
                 <div className="text-center mb-10">
                     <h1 className="font-cinematic text-5xl text-white mb-2 tracking-widest">SELECT YOUR <span className="text-yellow-600">AVATAR</span></h1>
                     <p className="text-gray-500 font-mono text-sm tracking-widest">THE REALM AWAITS YOUR PRESENCE</p>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                    {availableChars.map(c => (
-                        <div key={c.id} onClick={() => setSelectedChar(c)} className="bg-[#0a0a0a] border border-[#333] rounded-xl p-8 hover:border-yellow-600 hover:scale-105 transition-all cursor-pointer group relative overflow-hidden w-64 text-center">
-                            <div className="w-24 h-24 mx-auto bg-black rounded-full border-2 border-[#444] flex items-center justify-center mb-6 group-hover:border-yellow-600 transition-colors shadow-[0_0_30px_rgba(0,0,0,0.5)]">
-                                <span className="font-cinematic text-4xl text-gray-500 group-hover:text-yellow-600 transition-colors">{c.name.charAt(0)}</span>
-                            </div>
-                            <h3 className="font-cinematic text-xl text-white mb-1 group-hover:text-yellow-500 transition-colors">{c.name}</h3>
-                            <p className="text-xs font-mono text-gray-500 uppercase tracking-widest">{c.race} {c.class_name}</p>
-                            <div className="mt-6 pt-6 border-t border-[#222]">
-                                <span className="text-[10px] font-bold bg-white/5 px-3 py-1 rounded text-gray-400">LEVEL {c.level}</span>
-                            </div>
-                            <div className="absolute inset-0 bg-gradient-to-t from-yellow-900/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
-                        </div>
-                    ))}
+
+                <div className="flex gap-4 mb-8">
+                    <button onClick={openCreateHero} className={S.btnPrimary}><UserPlus size={14}/> New Hero</button>
+                    <button onClick={handleImportClick} className={S.btnSecondary}><Upload size={14}/> Import Hero</button>
                 </div>
+
+                {loadingChars ? (
+                    <div className="text-gray-500 font-mono text-sm tracking-widest flex items-center gap-2"><RefreshCw size={14} className="animate-spin" /> Loading Heroes...</div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                        {availableChars.map((c, idx) => (
+                            <div key={c.id || idx} onClick={() => { setSelectedChar(normalizeChar(c)); setView("sheet"); }} className="bg-[#0a0a0a] border border-[#333] rounded-xl p-8 hover:border-yellow-600 hover:scale-105 transition-all cursor-pointer group relative overflow-hidden w-64 text-center">
+                                <div className="w-24 h-24 mx-auto bg-black rounded-full border-2 border-[#444] flex items-center justify-center mb-6 group-hover:border-yellow-600 transition-colors shadow-[0_0_30px_rgba(0,0,0,0.5)] overflow-hidden">
+                                    <span className="font-cinematic text-4xl text-gray-500 group-hover:text-yellow-600 transition-colors">{(c.name || "?").charAt(0)}</span>
+                                </div>
+                                <h3 className="font-cinematic text-xl text-white mb-1 group-hover:text-yellow-500 transition-colors">{c.name || "Unnamed"}</h3>
+                                <p className="text-xs font-mono text-gray-500 uppercase tracking-widest">{c.race || ""} {c.class_name || ""}</p>
+                                <div className="mt-6 pt-6 border-t border-[#222]">
+                                    <span className="text-[10px] font-bold bg-white/5 px-3 py-1 rounded text-gray-400">LEVEL {c.level || 1}</span>
+                                </div>
+                                <div className="absolute inset-0 bg-gradient-to-t from-yellow-900/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+                            </div>
+                        ))}
+                    </div>
+                )}
             </div>
         )
     }
 
-    // UPDATE HANDLER
+    // UPDATE HANDLER (local for now)
     const updateChar = (field, value) => {
         setSelectedChar(prev => ({ ...prev, [field]: value }));
     };
 
     return (
         <div className="max-w-7xl mx-auto pb-20 animate-fade-in h-full flex flex-col">
+            {createHeroModal}
             <PlayerHeader char={selectedChar} onUpdate={updateChar} onLogout={() => setSelectedChar(null)} notify={notify} />
-            
+
             {/* NAVIGATION TABS */}
             <div className="flex border-b border-[#222] mb-6 overflow-x-auto custom-scrollbar">
                 {[
-                    {id: 'sheet', icon: Scroll, label: 'Character Sheet'}, 
-                    {id: 'dice', icon: Dices, label: 'Dice Engine'}, 
-                    {id: 'notes', icon: Edit3, label: 'Grimoire'}, 
-                    {id: 'gallery', icon: ImageIcon, label: 'Art Gallery'},
+                    {id: 'sheet', icon: Scroll, label: 'Character Sheet'},
+                    {id: 'dice', icon: Dices, label: 'Dice Engine'},
+                    {id: 'notes', icon: Edit3, label: 'Grimoire'},
+                    {id: 'gallery', icon: ImageIcon, label: 'Vision Archive'},
                     {id: 'npc', icon: Users, label: 'NPC Codex'}
                 ].map(tab => (
                     <button key={tab.id} onClick={() => setView(tab.id)} className={`px-8 py-4 flex items-center gap-2 text-xs font-bold uppercase tracking-widest transition-all whitespace-nowrap ${view === tab.id ? "text-yellow-500 border-b-2 border-yellow-500 bg-white/5" : "text-gray-500 hover:text-white"}`}>
@@ -871,15 +1432,79 @@ function PlayerPortalView({ notify, addLog }) {
     )
 }
 
+
 // --- SUB-COMPONENT: PLAYER HEADER (AVATAR & DISCORD) ---
 function PlayerHeader({ char, onUpdate, onLogout, notify }) {
-    const [discordId, setDiscordId] = useState("Link Discord");
+    const [discordId, setDiscordId] = useState(char.owner_discord_id ? char.owner_discord_id : "Link Discord");
     const [isEditingDiscord, setIsEditingDiscord] = useState(false);
     const fileInputRef = useRef(null);
 
+    useEffect(() => {
+        setDiscordId(char.owner_discord_id ? char.owner_discord_id : "Link Discord");
+    }, [char.owner_discord_id]);
+
     const handleAvatarClick = () => { fileInputRef.current.click(); };
-    const handleFileChange = (e) => { 
-        if(e.target.files[0]) notify("Avatar Updated (Mock)"); 
+    const handleFileChange = async (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        if (!char.character_id) { notify("Character missing ID", "error"); return; }
+
+        try {
+            const fd = new FormData();
+            fd.append("file", f);
+            const res = await axios.post(`${API_URL}/game/characters/${char.character_id}/avatar`, fd, {
+                headers: { "Content-Type": "multipart/form-data" },
+            });
+            if (res.data?.avatar_url) {
+                onUpdate("avatar_url", res.data.avatar_url);
+                notify("Avatar Updated");
+            } else {
+                notify("Avatar Upload Failed", "error");
+            }
+        } catch (e) {
+            console.error(e);
+            notify("Avatar Upload Failed", "error");
+        } finally {
+            // allow re-upload same file
+            try { e.target.value = ""; } catch { }
+        }
+    };
+
+    const downloadJson = (filename, obj) => {
+        try {
+            const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e) { console.error(e); }
+    };
+
+    const exportCharacter = async () => {
+        if (!char.character_id) return;
+        try {
+            const res = await axios.get(`${API_URL}/game/characters/${char.character_id}/export`);
+            downloadJson(`${char.name || "character"}.json`, res.data);
+            notify("Character Exported");
+        } catch (e) {
+            console.error(e);
+            notify("Export Failed", "error");
+        }
+    };
+
+    const downloadTemplate = async () => {
+        try {
+            const res = await axios.get(`${API_URL}/game/characters/template`);
+            downloadJson("realmquest-character-template.json", res.data);
+            notify("Template Downloaded");
+        } catch (e) {
+            console.error(e);
+            notify("Template Download Failed", "error");
+        }
     };
 
     return (
@@ -889,7 +1514,11 @@ function PlayerHeader({ char, onUpdate, onLogout, notify }) {
             <div className="relative z-10 flex gap-6 items-center">
                 {/* CLICKABLE AVATAR */}
                 <div onClick={handleAvatarClick} className="w-20 h-20 bg-black rounded-full border-2 border-yellow-600 flex items-center justify-center shadow-[0_0_20px_rgba(202,138,4,0.3)] cursor-pointer hover:scale-105 transition-transform group relative overflow-hidden">
-                    <span className="font-cinematic text-3xl text-yellow-600 group-hover:opacity-0 transition-opacity">{char.name.charAt(0)}</span>
+                    {char.avatar_url ? (
+                        <img src={`${API_URL}${char.avatar_url}`} alt="avatar" className="w-full h-full object-cover" />
+                    ) : (
+                        <span className="font-cinematic text-3xl text-yellow-600 group-hover:opacity-0 transition-opacity">{char.name.charAt(0)}</span>
+                    )}
                     <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 bg-black/50 transition-opacity">
                         <Upload size={20} className="text-white" />
                     </div>
@@ -911,7 +1540,13 @@ function PlayerHeader({ char, onUpdate, onLogout, notify }) {
                         <div className="flex items-center bg-[#0a0a0a] border border-indigo-500/50 rounded px-2">
                              <input className="bg-transparent border-none text-[10px] text-indigo-300 w-24 focus:outline-none font-mono" autoFocus 
                                 defaultValue={discordId} 
-                                onBlur={(e) => { setDiscordId(e.target.value); setIsEditingDiscord(false); notify("Soul Linked"); }}
+                                onBlur={(e) => {
+                                    const v = (e.target.value || "").trim();
+                                    setDiscordId(v || "Link Discord");
+                                    setIsEditingDiscord(false);
+                                    onUpdate("owner_discord_id", v);
+                                    notify(v ? "Soul Linked" : "Soul Unlinked");
+                                }}
                                 onKeyDown={(e) => { if(e.key === 'Enter') e.target.blur(); }}
                              />
                         </div>
@@ -920,6 +1555,14 @@ function PlayerHeader({ char, onUpdate, onLogout, notify }) {
                             <LinkIcon size={12} /> {discordId}
                         </button>
                     )}
+
+                    <button onClick={exportCharacter} className="text-[10px] bg-emerald-900/30 text-emerald-400 border border-emerald-500/30 px-3 py-1 rounded hover:bg-emerald-500 hover:text-white transition-all uppercase tracking-widest flex items-center gap-2">
+                        <Save size={12} /> Export
+                    </button>
+
+                    <button onClick={downloadTemplate} className="text-[10px] bg-sky-900/30 text-sky-400 border border-sky-500/30 px-3 py-1 rounded hover:bg-sky-500 hover:text-white transition-all uppercase tracking-widest flex items-center gap-2">
+                        <Scroll size={12} /> Template
+                    </button>
                     
                     <button onClick={onLogout} className="text-[10px] bg-red-900/30 text-red-500 border border-red-500/30 px-3 py-1 rounded hover:bg-red-500 hover:text-white transition-all uppercase tracking-widest">
                         Exit Portal
@@ -1127,7 +1770,7 @@ function FeatureBlock({ title, desc }) {
 }
 
 // --- SUB-COMPONENT: TACTICAL DICE ENGINE ---
-function DiceEngine({ notify }) {
+function DiceEngine({ notify, char }) {
     const [history, setHistory] = useState([]);
     const [rolling, setRolling] = useState(false);
     
@@ -1160,10 +1803,28 @@ function DiceEngine({ notify }) {
         };
         
         setHistory(prev => [newLog, ...prev]);
+
+        // Back-end hook (so bot/AI can be aware of rolls)
+        try {
+            await axios.post(`${API_URL}/game/roll`, {
+                character_id: char?.character_id || null,
+                owner_discord_id: char?.owner_discord_id || null,
+                dice_count: diceCount,
+                sides,
+                modifier: parseInt(modifier) || 0,
+                bonus: parseInt(bonus) || 0,
+                attribute: attribute || null,
+                rolls,
+                grand_total: grandTotal,
+            });
+        } catch (e) {
+            // Silent: never interrupt gameplay UI for telemetry failures
+            console.error(e);
+        }
         setRolling(false);
     };
 
-    const clearHistory = () => { if(confirm("Clear Roll Log?")) setHistory([]); };
+    const clearHistory = async () => { if (await rqConfirm({ title: "Clear Roll Log", message: "Clear Roll Log?", confirmText: "Clear", cancelText: "Cancel", danger: true })) setHistory([]); };
 
     return (
         <div className="h-full grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in">
@@ -1261,47 +1922,470 @@ function DiceEngine({ notify }) {
 }
 
 // --- SUB-COMPONENT: NPC CODEX (DYNAMIC IMAGES) ---
-function NPCCodex() {
-    // MOCK DATA - In production, 'img_url' would come from your API/Storage
-    const npcs = [
-        {name: "Thalor", role: "Innkeeper", race: "Human", loc: "The Rusty Anchor", img_url: "https://i.imgur.com/8Q8q1Qy.png", desc: "A burly man with a eyepatch and a heart of gold. Knows all the rumors."},
-        {name: "Lyra", role: "Spy", race: "Tiefling", loc: "Undercity", img_url: "https://i.imgur.com/J5y9QyM.png", desc: "Whispers say she serves a darker master. Always asking for a price."},
-        {name: "Grum", role: "Smith", race: "Half-Orc", loc: "Market", img_url: "https://i.imgur.com/4Q4q4Qy.png", desc: "Doesn't talk much. Makes the best steel in the city."}
-    ];
 
-    return (
-        <div className="animate-fade-in">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {npcs.map((n, i) => (
-                    <div key={i} className="bg-[#0a0a0a] border border-[#333] rounded-xl overflow-hidden group hover:border-yellow-600/50 transition-all cursor-pointer">
-                        {/* DYNAMIC IMAGE HANDLER */}
-                        <div className="h-48 relative bg-[#111] overflow-hidden">
-                             {n.img_url ? (
-                                <img src={n.img_url} alt={n.name} className="w-full h-full object-cover opacity-50 group-hover:opacity-100 transition-opacity" onError={(e) => e.target.style.display='none'} />
-                             ) : <div className="w-full h-full flex items-center justify-center text-gray-700"><UserCircle size={48} /></div>}
-                             
-                            <div className="absolute bottom-0 left-0 w-full p-4 bg-gradient-to-t from-black to-transparent">
-                                <h3 className="font-cinematic text-2xl text-white drop-shadow-md">{n.name}</h3>
-                                <span className="text-[10px] bg-yellow-900/40 px-2 py-1 rounded text-yellow-500 uppercase tracking-widest backdrop-blur-sm border border-yellow-500/20">{n.role}</span>
-                            </div>
+function NPCCodex({ notify }) {
+    const [npcs, setNpcs] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [selectedNpc, setSelectedNpc] = useState(null);
+    const [query, setQuery] = useState("");
+    const [refreshing, setRefreshing] = useState(false);
+
+    const portraitInputRef = useRef(null);
+    const [portraitUploading, setPortraitUploading] = useState(false);
+    const [deletingNpc, setDeletingNpc] = useState(false);
+
+    const apiDeleteNpc = async (npc) => {
+        const npcId = (npc?.id || "").toString();
+        if (!npcId) return;
+        const ok = await rqConfirm({
+            title: "Delete NPC",
+            message: `Delete NPC dossier AND portrait for "${npc?.name || npcId}"? This cannot be undone.`,
+            confirmText: "Delete",
+            cancelText: "Cancel",
+            danger: true,
+        });
+        if (!ok) return;
+
+        setDeletingNpc(true);
+        try {
+            await axios.delete(`${API_URL}/system/campaigns/codex/npcs/${encodeURIComponent(npcId)}?delete_portrait=true`);
+            notify && notify("NPC Deleted");
+            setSelectedNpc(null);
+            await fetchNpcs();
+        } catch (e) {
+            console.error(e);
+            notify && notify("Delete Failed", "error");
+        } finally {
+            setDeletingNpc(false);
+        }
+    };
+
+    const apiReplaceNpcPortrait = async (npc, file) => {
+        const npcId = (npc?.id || "").toString();
+        if (!npcId || !file) return;
+        setPortraitUploading(true);
+        try {
+            const form = new FormData();
+            form.append("file", file);
+            await axios.post(`${API_URL}/system/campaigns/codex/npcs/${encodeURIComponent(npcId)}/portrait`, form, {
+                headers: { "Content-Type": "multipart/form-data" },
+            });
+            notify && notify("Portrait Updated");
+            await fetchNpcs();
+            // refresh selected NPC from updated list if still open
+            setSelectedNpc((prev) => {
+                if (!prev) return prev;
+                if ((prev?.id || "").toString() !== npcId) return prev;
+                return prev;
+            });
+        } catch (e) {
+            console.error(e);
+            notify && notify("Portrait Update Failed", "error");
+        } finally {
+            setPortraitUploading(false);
+            try { if (portraitInputRef.current) portraitInputRef.current.value = ""; } catch {}
+        }
+    };
+
+    const fmtEpoch = (epoch) => {
+        if (!epoch) return "";
+        try { return new Date(epoch * 1000).toLocaleString([], { hour12: false }); } catch { return ""; }
+    };
+
+    const copyText = async (txt) => {
+        const v = (txt || "").toString();
+        if (!v) return;
+        try {
+            if (navigator?.clipboard?.writeText) {
+                await navigator.clipboard.writeText(v);
+                return true;
+            }
+        } catch { /* fall through */ }
+        try {
+            const ta = document.createElement("textarea");
+            ta.value = v;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            ta.remove();
+            return true;
+        } catch {
+            return false;
+        }
+    };
+
+    const fetchNpcs = useCallback(async () => {
+        setRefreshing(true);
+        try {
+            const res = await axios.get(`${API_URL}/system/campaigns/codex/npcs?include_dossier=true`);
+            const items = res?.data?.items;
+            setNpcs(Array.isArray(items) ? items : []);
+        } catch (e) {
+            console.error(e);
+            setNpcs([]);
+        } finally {
+            setRefreshing(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        let mounted = true;
+        (async () => {
+            setLoading(true);
+            try {
+                const res = await axios.get(`${API_URL}/system/campaigns/codex/npcs?include_dossier=true`);
+                const items = res?.data?.items;
+                if (!mounted) return;
+                setNpcs(Array.isArray(items) ? items : []);
+            } catch (e) {
+                console.error(e);
+                if (mounted) setNpcs([]);
+            } finally {
+                if (mounted) setLoading(false);
+            }
+        })();
+        return () => { mounted = false; };
+    }, []);
+
+    const filtered = useMemo(() => {
+        const q = (query || "").trim().toLowerCase();
+        if (!q) return npcs;
+        return (npcs || []).filter((n) => {
+            const name = (n?.name || n?.dossier?.name || n?.id || "").toString().toLowerCase();
+            const loc = (n?.dossier?.location || "").toString().toLowerCase();
+            const role = (n?.dossier?.stats?.class || "").toString().toLowerCase();
+            const desc = (n?.dossier?.desc || "").toString().toLowerCase();
+            return name.includes(q) || loc.includes(q) || role.includes(q) || desc.includes(q);
+        });
+    }, [npcs, query]);
+
+    const resolvePortraitUrl = (n) => {
+        // Prefer API-provided portrait.url (already campaign-scoped).
+        const portraitUrl = (n?.portrait?.url || n?.portrait_url || null)
+            || (n?.dossier?.image || n?.dossier?.portrait || n?.dossier?.avatar || null);
+
+        if (!portraitUrl) return null;
+
+        // If it is already campaign-scoped, use as-is.
+        if (portraitUrl.startsWith("/campaigns/")) return portraitUrl;
+
+        // If it is an absolute URL (http/https), return as-is (rare but safe).
+        if (portraitUrl.startsWith("http://") || portraitUrl.startsWith("https://")) return portraitUrl;
+
+        // If it is a relative path like "assets/images/..." from dossier, prefix with this NPC's campaign if we can infer it.
+        const rel = portraitUrl.replace(/^\//, "");
+        const jsonUrl = (n?.json_url || n?.jsonUrl || "").toString();
+        const m = jsonUrl.match(/^(\/campaigns\/[^\/]+\/)/);
+        if (m && m[1]) {
+            return `${m[1]}${rel}`;
+        }
+
+        // Fallback: just make it root-relative.
+        return `/${rel}`;
+    };
+
+    const selectedPortrait = resolvePortraitUrl(selectedNpc);
+    const selectedJsonUrl = selectedNpc?.json_url ? (selectedNpc.json_url.startsWith("/") ? selectedNpc.json_url : `/${selectedNpc.json_url}`) : null;
+
+    const npcModal = selectedNpc ? (
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/80 backdrop-blur-sm p-6 animate-fade-in">
+            <div className="w-full max-w-5xl bg-[#0a0a0a]/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 bg-white/5">
+                    <div className="flex items-center gap-2">
+                        <Users size={16} className="text-yellow-600" />
+                        <span className="font-mono text-xs uppercase tracking-widest text-white">NPC DOSSIER</span>
+                    </div>
+                    <button onClick={() => setSelectedNpc(null)} className="text-gray-500 hover:text-white transition-colors">
+                        <X size={18} />
+                    </button>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-0">
+                    <div className="lg:col-span-1 border-b lg:border-b-0 lg:border-r border-white/10 bg-black/30">
+                        <div className="aspect-square w-full bg-[#111] overflow-hidden">
+                            {selectedPortrait ? (
+                                <img
+                                    src={`${API_URL}${selectedPortrait}`}
+                                    alt={selectedNpc?.name || selectedNpc?.id || "npc"}
+                                    className="w-full h-full object-cover opacity-90"
+                                />
+                            ) : (
+                                <div className="w-full h-full flex items-center justify-center text-gray-700">
+                                    <UserCircle size={64} />
+                                </div>
+                            )}
                         </div>
-                        <div className="p-4">
-                            <div className="flex justify-between text-xs text-gray-500 mb-2 font-mono">
-                                <span>{n.race}</span>
-                                <span className="text-gray-400">{n.loc}</span>
+                        <div className="p-6">
+                            <h3 className="font-cinematic text-3xl text-white">{selectedNpc?.name || selectedNpc?.id}</h3>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                                <span className="text-[10px] bg-yellow-900/40 px-2 py-1 rounded text-yellow-500 uppercase tracking-widest backdrop-blur-sm border border-yellow-500/20">
+                                    {(selectedNpc?.dossier?.stats?.class) || "NPC"}
+                                </span>
+                                {selectedNpc?.dossier?.location && (
+                                    <span className="text-[10px] bg-white/5 px-2 py-1 rounded text-gray-400 uppercase tracking-widest border border-white/10">
+                                        {selectedNpc.dossier.location}
+                                    </span>
+                                )}
                             </div>
-                            <p className="text-xs text-gray-400 leading-relaxed mb-4">{n.desc}</p>
-                            <div className="flex gap-2">
-                                <button className="flex-1 bg-white/5 border border-white/10 py-2 rounded text-[10px] uppercase font-bold text-gray-400 hover:text-white hover:bg-white/10 transition-colors">Stats</button>
-                                <button className="flex-1 bg-white/5 border border-white/10 py-2 rounded text-[10px] uppercase font-bold text-gray-400 hover:text-white hover:bg-white/10 transition-colors">Chat</button>
+                            <div className="mt-4 space-y-2">
+                                {selectedNpc?.dossier?.voice_id && (
+                                    <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">
+                                        VOICE_ID: <span className="text-gray-300">{selectedNpc.dossier.voice_id}</span>
+                                    </div>
+                                )}
+                                {selectedNpc?.dossier?.created_at && (
+                                    <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">
+                                        CREATED: <span className="text-gray-300">{fmtEpoch(selectedNpc.dossier.created_at)}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="mt-6 grid grid-cols-1 gap-2">
+                                <input
+                                    ref={portraitInputRef}
+                                    type="file"
+                                    accept="image/png,image/jpeg,image/webp"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                        const f = e?.target?.files?.[0];
+                                        if (f) apiReplaceNpcPortrait(selectedNpc, f);
+                                    }}
+                                />
+
+                                <button
+                                    onClick={() => {
+                                        try { portraitInputRef.current && portraitInputRef.current.click(); } catch {}
+                                    }}
+                                    className={S.btnPrimary}
+                                    title="Replace NPC Portrait"
+                                    disabled={portraitUploading || deletingNpc}
+                                >
+                                    <Upload size={14}/> {portraitUploading ? "Uploading..." : "Replace Portrait"}
+                                </button>
+
+                                <button
+                                    onClick={() => apiDeleteNpc(selectedNpc)}
+                                    className={S.btnDanger}
+                                    title="Delete NPC Dossier + Portrait"
+                                    disabled={portraitUploading || deletingNpc}
+                                >
+                                    <Trash2 size={14}/> {deletingNpc ? "Deleting..." : "Delete NPC"}
+                                </button>
+
+                                {selectedPortrait && (
+                                    <button
+                                        onClick={async () => {
+                                            const ok = await copyText(`${API_URL}${selectedPortrait}`);
+                                            // lightweight toast fallback via title is handled by browser; keep silent
+                                            if (!ok) { /* noop */ }
+                                        }}
+                                        className={S.btnSecondary}
+                                        title="Copy Image URL"
+                                    >
+                                        <LinkIcon size={14}/> Copy Image URL
+                                    </button>
+                                )}
+                                {selectedJsonUrl && (
+                                    <button
+                                        onClick={async () => {
+                                            const ok = await copyText(`${API_URL}${selectedJsonUrl}`);
+                                            if (!ok) { /* noop */ }
+                                        }}
+                                        className={S.btnSecondary}
+                                        title="Copy JSON URL"
+                                    >
+                                        <LinkIcon size={14}/> Copy JSON URL
+                                    </button>
+                                )}
+                                {selectedJsonUrl && (
+                                    <a
+                                        href={`${API_URL}${selectedJsonUrl}`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className={S.btnSecondary}
+                                        title="Open dossier JSON"
+                                    >
+                                        <Eye size={14}/> Open JSON
+                                    </a>
+                                )}
                             </div>
                         </div>
                     </div>
-                ))}
+
+                    <div className="lg:col-span-2 p-6">
+                        <div className="flex items-center justify-between mb-4">
+                            <h4 className={S.sectionHeader + " mb-0 border-none"}>Dossier</h4>
+                            <button
+                                onClick={() => {
+                                    try {
+                                        const blob = new Blob([JSON.stringify(selectedNpc?.dossier || {}, null, 2)], { type: "application/json" });
+                                        const url = URL.createObjectURL(blob);
+                                        const a = document.createElement("a");
+                                        a.href = url;
+                                        a.download = `${selectedNpc?.id || "npc"}.json`;
+                                        document.body.appendChild(a);
+                                        a.click();
+                                        a.remove();
+                                        URL.revokeObjectURL(url);
+                                    } catch (e) { console.error(e); }
+                                }}
+                                className={S.btnSecondary}
+                                title="Download dossier JSON"
+                            >
+                                <Save size={14}/> Download JSON
+                            </button>
+                        </div>
+
+                        <div className="bg-black/40 border border-white/10 rounded-xl p-5 text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">
+                            {selectedNpc?.dossier?.desc ? selectedNpc.dossier.desc : "No description provided yet."}
+                        </div>
+
+                        <div className="mt-6">
+                            <h4 className={S.sectionHeader}>Stats</h4>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                {Object.entries(selectedNpc?.dossier?.stats || {}).length === 0 ? (
+                                    <div className="col-span-full text-gray-500 font-mono text-xs tracking-widest">No stats yet.</div>
+                                ) : (
+                                    Object.entries(selectedNpc.dossier.stats).map(([k, v]) => (
+                                        <div key={k} className="bg-white/5 border border-white/10 rounded-lg p-3">
+                                            <div className="text-[9px] font-mono text-gray-500 uppercase tracking-widest">{k}</div>
+                                            <div className="font-mono text-xs text-gray-200 mt-1">{String(v)}</div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="mt-6 pt-4 border-t border-white/10">
+                            <div className="flex items-center justify-between">
+                                <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">
+                                    ID: <span className="text-gray-300">{selectedNpc?.id || "npc"}</span>
+                                </div>
+                                {selectedNpc?.json_filename && (
+                                    <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">
+                                        FILE: <span className="text-gray-300">{selectedNpc.json_filename}</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    ) : null;
+
+    return (
+        <div className="animate-fade-in">
+            {npcModal}
+
+            <div className="flex items-center justify-between mb-4 gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                    <div className="text-[10px] font-mono uppercase tracking-widest text-gray-500">
+                        NPC COUNT: <span className="text-gray-200">{filtered.length}</span>
+                    </div>
+                    <div className="hidden md:block text-[10px] font-mono uppercase tracking-widest text-gray-600 truncate">
+                        SEARCHES NAME / LOCATION / ROLE / DESC
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                    <input
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        className={S.input + " w-[260px] text-xs"}
+                        placeholder="Search NPCs..."
+                    />
+                    <button
+                        onClick={fetchNpcs}
+                        className={S.btnSecondary}
+                        title="Refresh Codex"
+                    >
+                        <RefreshCw size={14} className={refreshing ? "animate-spin" : ""}/> Refresh
+                    </button>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {loading ? (
+                    <div className="col-span-full text-gray-500 font-mono text-sm tracking-widest flex items-center gap-2">
+                        <RefreshCw size={14} className="animate-spin" /> Scanning Codex...
+                    </div>
+                ) : filtered.length === 0 ? (
+                    <div className="col-span-full text-center text-gray-500 font-mono text-sm tracking-widest">
+                        No NPC dossiers found in this campaign.
+                    </div>
+                ) : filtered.map((n) => {
+                    const resolvedPortrait = resolvePortraitUrl(n);
+                    const name = n?.name || n?.dossier?.name || n?.id || "NPC";
+                    const desc = n?.dossier?.desc || "";
+                    const loc = n?.dossier?.location || "";
+                    const role = n?.dossier?.stats?.class || "NPC";
+                    const created = n?.dossier?.created_at ? fmtEpoch(n.dossier.created_at) : "";
+
+                    return (
+                        <div
+                            key={n?.id || name}
+                            onClick={() => setSelectedNpc(n)}
+                            className="bg-[#0a0a0a] border border-[#333] rounded-xl overflow-hidden group hover:border-yellow-600/50 transition-all cursor-pointer"
+                        >
+                            <div className="h-48 relative bg-[#111] overflow-hidden">
+                                {resolvedPortrait ? (
+                                    <img
+                                        src={`${API_URL}${resolvedPortrait}`}
+                                        alt={name}
+                                        className="w-full h-full object-cover opacity-50 group-hover:opacity-100 transition-opacity"
+                                        onError={(e) => { try { e.target.style.display = 'none'; } catch {} }}
+                                    />
+                                ) : (
+                                    <div className="w-full h-full flex items-center justify-center text-gray-700">
+                                        <UserCircle size={48} />
+                                    </div>
+                                )}
+
+                                <div className="absolute bottom-0 left-0 w-full p-4 bg-gradient-to-t from-black to-transparent">
+                                    <h3 className="font-cinematic text-2xl text-white drop-shadow-md">{name}</h3>
+                                    <div className="mt-2 flex items-center gap-2 flex-wrap">
+                                        <span className="text-[10px] bg-yellow-900/40 px-2 py-1 rounded text-yellow-500 uppercase tracking-widest backdrop-blur-sm border border-yellow-500/20">
+                                            {role}
+                                        </span>
+                                        {loc && (
+                                            <span className="text-[10px] bg-white/5 px-2 py-1 rounded text-gray-400 uppercase tracking-widest border border-white/10">
+                                                {loc}
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="p-4">
+                                <div className="flex justify-between text-[10px] text-gray-500 mb-2 font-mono uppercase tracking-widest">
+                                    <span>{created ? "CREATED" : ""}</span>
+                                    <span className="text-gray-400">{created || ""}</span>
+                                </div>
+
+                                <p className="text-xs text-gray-400 leading-relaxed mb-4 whitespace-pre-wrap line-clamp-4">
+                                    {desc || "No description yet."}
+                                </p>
+
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); setSelectedNpc(n); }}
+                                        className="flex-1 bg-white/5 border border-white/10 py-2 rounded text-[10px] uppercase font-bold text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                                    >
+                                        View Dossier
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                })}
             </div>
         </div>
     )
 }
+
 
 function Grimoire({ notify }) {
     const [note, setNote] = useState("Session 1: The tavern was on fire when we arrived...");
@@ -1317,20 +2401,483 @@ function Grimoire({ notify }) {
     )
 }
 
-function ArtGallery() {
+
+function ArtGallery({ notify }) {
+    const [assets, setAssets] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [selectedAsset, setSelectedAsset] = useState(null);
+
+    const replaceInputRef = useRef(null);
+    const [replacing, setReplacing] = useState(false);
+    const [deleting, setDeleting] = useState(false);
+
+    const apiDeleteImage = async (asset, force = false) => {
+        const fn = (asset?.filename || "").toString();
+        if (!fn) return;
+        const ok = await rqConfirm({
+            title: force ? "Force Delete Image" : "Delete Image",
+            message: force
+                ? `This image appears referenced by one or more NPC dossiers. Force delete "${fn}" anyway?`
+                : `Delete image "${fn}" from this campaign's Vision Archive? This cannot be undone.`,
+            confirmText: force ? "Force Delete" : "Delete",
+            cancelText: "Cancel",
+            danger: true,
+        });
+        if (!ok) return;
+
+        setDeleting(true);
+        try {
+            await axios.delete(`${API_URL}/system/campaigns/gallery/images/${encodeURIComponent(fn)}?force=${force ? "true" : "false"}`);
+            notify && notify("Image Deleted");
+            setSelectedAsset(null);
+            await refresh();
+        } catch (e) {
+            // If referenced, offer force delete
+            const status = e?.response?.status;
+            const detail = e?.response?.data?.detail;
+            if (status === 409 && !force) {
+                const refs = detail?.refs || [];
+                const ok2 = await rqConfirm({
+                    title: "Image In Use",
+                    message: `This image is referenced by ${refs.length || "one or more"} NPC dossier(s). Force delete anyway?`,
+                    confirmText: "Force Delete",
+                    cancelText: "Cancel",
+                    danger: true,
+                });
+                if (ok2) {
+                    await apiDeleteImage(asset, true);
+                }
+            } else {
+                console.error(e);
+                notify && notify("Delete Failed", "error");
+            }
+        } finally {
+            setDeleting(false);
+        }
+    };
+
+    const apiReplaceImage = async (asset, file) => {
+        const fn = (asset?.filename || "").toString();
+        if (!fn || !file) return;
+        setReplacing(true);
+        try {
+            const form = new FormData();
+            form.append("file", file);
+            await axios.post(`${API_URL}/system/campaigns/gallery/images/${encodeURIComponent(fn)}/replace`, form, {
+                headers: { "Content-Type": "multipart/form-data" },
+            });
+            notify && notify("Image Updated");
+            await refresh();
+            setSelectedAsset((prev) => prev ? { ...prev, modified_epoch: Math.floor(Date.now()/1000) } : prev);
+        } catch (e) {
+            console.error(e);
+            notify && notify("Update Failed", "error");
+        } finally {
+            setReplacing(false);
+            try { if (replaceInputRef.current) replaceInputRef.current.value = ""; } catch {}
+        }
+    };
+    const [query, setQuery] = useState("");
+    const [kind, setKind] = useState("all");
+    const [hideNpcPortraits, setHideNpcPortraits] = useState(false);
+    const [showPrompt, setShowPrompt] = useState(false);
+    const [refreshing, setRefreshing] = useState(false);
+
+    const fmtEpoch = (epoch) => {
+        if (!epoch) return "";
+        try { return new Date(epoch * 1000).toLocaleString([], { hour12: false }); } catch { return ""; }
+    };
+
+    const copyText = async (txt) => {
+        const v = (txt || "").toString();
+        if (!v) return false;
+        try {
+            if (navigator?.clipboard?.writeText) {
+                await navigator.clipboard.writeText(v);
+                return true;
+            }
+        } catch { /* fall through */ }
+        try {
+            const ta = document.createElement("textarea");
+            ta.value = v;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            ta.remove();
+            return true;
+        } catch {
+            return false;
+        }
+    };
+
+    const normalizeKind = (a) => {
+        const k = (a?.kind || a?.meta?.kind || "").toString().toLowerCase().trim();
+        if (!k) return "unknown";
+        return k;
+    };
+
+    const fetchAssets = useCallback(async () => {
+        setRefreshing(true);
+        try {
+            const res = await axios.get(`${API_URL}/system/campaigns/gallery/images`);
+            const items = res?.data?.items;
+            setAssets(Array.isArray(items) ? items : []);
+        } catch (e) {
+            console.error(e);
+            setAssets([]);
+        } finally {
+            setRefreshing(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        let mounted = true;
+        (async () => {
+            setLoading(true);
+            try {
+                const res = await axios.get(`${API_URL}/system/campaigns/gallery/images`);
+                const items = res?.data?.items;
+                if (!mounted) return;
+                setAssets(Array.isArray(items) ? items : []);
+            } catch (e) {
+                console.error(e);
+                if (mounted) setAssets([]);
+            } finally {
+                if (mounted) setLoading(false);
+            }
+        })();
+        return () => { mounted = false; };
+    }, []);
+
+    const kinds = useMemo(() => {
+        const set = new Set();
+        (assets || []).forEach((a) => set.add(normalizeKind(a)));
+        const list = Array.from(set).filter(Boolean).sort();
+        return ["all", ...list];
+    }, [assets]);
+
+    const filtered = useMemo(() => {
+        const q = (query || "").trim().toLowerCase();
+        return (assets || []).filter((a) => {
+            const k = normalizeKind(a);
+            if (kind !== "all" && k !== kind) return false;
+
+            // Optional: hide NPC portraits (keeps the "cinematic gallery" cleaner during sessions)
+            const isNpc = k.includes("npc") || k === "portrait" || (a?.meta?.npc_id || a?.meta?.npc_name);
+            if (hideNpcPortraits && isNpc) return false;
+
+            if (!q) return true;
+            const hay = [
+                a?.title, a?.caption, a?.prompt, a?.filename,
+                a?.meta?.title, a?.meta?.caption, a?.meta?.prompt,
+                a?.meta?.scene, a?.meta?.location, a?.meta?.tags
+            ].filter(Boolean).join(" ").toLowerCase();
+            return hay.includes(q);
+        });
+    }, [assets, query, kind, hideNpcPortraits]);
+
+    const deriveTitle = (a) => {
+        return a?.title || a?.meta?.title || a?.caption || a?.meta?.caption || a?.filename || "Untitled";
+    };
+
+    const deriveCaption = (a) => {
+        return a?.caption || a?.meta?.caption || "";
+    };
+
+    const derivePrompt = (a) => {
+        return a?.prompt || a?.meta?.prompt || "";
+    };
+
+    const deriveCreator = (a) => {
+        return a?.created_by || a?.meta?.created_by || a?.meta?.author || "";
+    };
+
+    const deriveCreatedAt = (a) => {
+        const v = a?.created_at || a?.meta?.created_at || a?.modified_epoch || a?.meta?.modified_epoch || null;
+        return v;
+    };
+
+    const lightbox = selectedAsset ? (
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/85 backdrop-blur-sm p-6 animate-fade-in">
+            <div className="w-full max-w-6xl bg-[#0a0a0a]/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 bg-white/5">
+                    <div className="flex items-center gap-2">
+                        <ImageIcon size={16} className="text-yellow-600" />
+                        <span className="font-mono text-xs uppercase tracking-widest text-white">VISION ARCHIVE</span>
+                    </div>
+                    <button onClick={() => { setSelectedAsset(null); setShowPrompt(false); }} className="text-gray-500 hover:text-white transition-colors">
+                        <X size={18} />
+                    </button>
+                </div>
+
+                <div className="p-6">
+                    <div className="bg-black/40 border border-white/10 rounded-xl overflow-hidden">
+                        <img
+                            src={`${API_URL}${selectedAsset.url}`}
+                            alt={selectedAsset.filename || "asset"}
+                            className="w-full max-h-[70vh] object-contain bg-black"
+                        />
+                    </div>
+
+                    <div className="mt-4 flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <div className="font-mono text-[10px] uppercase tracking-widest text-gray-300 truncate">{deriveTitle(selectedAsset)}</div>
+                                <span className="text-[10px] bg-yellow-900/40 px-2 py-1 rounded text-yellow-500 uppercase tracking-widest border border-yellow-500/20">
+                                    {normalizeKind(selectedAsset)}
+                                </span>
+                                {selectedAsset?.meta?.tags && (
+                                    <span className="text-[10px] bg-white/5 px-2 py-1 rounded text-gray-400 uppercase tracking-widest border border-white/10">
+                                        {Array.isArray(selectedAsset.meta.tags) ? selectedAsset.meta.tags.join(", ") : String(selectedAsset.meta.tags)}
+                                    </span>
+                                )}
+                            </div>
+
+                            {deriveCaption(selectedAsset) && (
+                                <div className="mt-2 text-sm text-gray-300 leading-relaxed">
+                                    {deriveCaption(selectedAsset)}
+                                </div>
+                            )}
+
+                            <div className="mt-3 font-mono text-[10px] text-gray-500 uppercase tracking-widest">
+                                {null}
+                                {selectedAsset.bytes ? <span> • {selectedAsset.bytes.toLocaleString()} bytes</span> : null}
+                                {deriveCreatedAt(selectedAsset) ? <span> • {fmtEpoch(deriveCreatedAt(selectedAsset))}</span> : null}
+                                {deriveCreator(selectedAsset) ? <span> • BY {deriveCreator(selectedAsset)}</span> : null}
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 md:justify-end flex-wrap">
+                            
+                            <input
+                                ref={replaceInputRef}
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                className="hidden"
+                                onChange={(e) => {
+                                    const f = e?.target?.files?.[0];
+                                    if (f) apiReplaceImage(selectedAsset, f);
+                                }}
+                            />
+                            
+                            <button
+                                onClick={() => apiDeleteImage(selectedAsset)}
+                                className={S.btnDanger}
+                                title="Delete Image"
+                                disabled={replacing || deleting}
+                            >
+                                <Trash2 size={14}/> {deleting ? "Deleting..." : "Delete"}
+                            </button>
+
+                            {derivePrompt(selectedAsset) && (
+                                <button
+                                    onClick={() => setShowPrompt(p => !p)}
+                                    className={S.btnSecondary}
+                                    title="Toggle prompt"
+                                >
+                                    <Scroll size={14}/> {showPrompt ? "Hide Prompt" : "Show Prompt"}
+                                </button>
+                            )}
+
+                            <a
+                                href={`${API_URL}${selectedAsset.url}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className={S.btnSecondary}
+                            >
+                                <Eye size={14}/> Open
+                            </a>
+                        </div>
+                    </div>
+
+                    {showPrompt && derivePrompt(selectedAsset) && (
+                        <div className="mt-4 bg-black/40 border border-white/10 rounded-xl p-4">
+                            <div className="flex items-center justify-between mb-2">
+                                <div className="text-[10px] font-mono uppercase tracking-widest text-gray-500">PROMPT / CONTEXT</div>
+                                <button
+                                    onClick={() => copyText(derivePrompt(selectedAsset))}
+                                    className="text-[10px] bg-white/5 border border-white/10 px-3 py-1 rounded uppercase font-bold text-gray-400 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-2"
+                                    title="Copy prompt"
+                                >
+                                    <Copy size={12}/> Copy
+                                </button>
+                            </div>
+                            <div className="text-xs text-gray-300 whitespace-pre-wrap leading-relaxed">
+                                {derivePrompt(selectedAsset)}
+                            </div>
+
+                            {selectedAsset?.meta && (selectedAsset.meta.scene || selectedAsset.meta.location || selectedAsset.meta.npc_name) && (
+                                <div className="mt-3 pt-3 border-t border-white/10 flex flex-wrap gap-2">
+                                    {selectedAsset.meta.scene && (
+                                        <span className="text-[10px] bg-white/5 px-2 py-1 rounded text-gray-400 uppercase tracking-widest border border-white/10">
+                                            SCENE: {String(selectedAsset.meta.scene)}
+                                        </span>
+                                    )}
+                                    {selectedAsset.meta.location && (
+                                        <span className="text-[10px] bg-white/5 px-2 py-1 rounded text-gray-400 uppercase tracking-widest border border-white/10">
+                                            LOC: {String(selectedAsset.meta.location)}
+                                        </span>
+                                    )}
+                                    {selectedAsset.meta.npc_name && (
+                                        <span className="text-[10px] bg-yellow-900/30 px-2 py-1 rounded text-yellow-500 uppercase tracking-widest border border-yellow-500/20">
+                                            NPC: {String(selectedAsset.meta.npc_name)}
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    ) : null;
+
     return (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-fade-in">
-             {[1,2,3,4,5,6,7,8].map(i => (
-                 <div key={i} className="aspect-square bg-[#0a0a0a] border border-[#222] rounded-lg flex items-center justify-center hover:border-yellow-600 transition-colors cursor-pointer group relative overflow-hidden">
-                     <ImageIcon className="text-gray-700 group-hover:text-gray-500" size={32} />
-                     <div className="absolute inset-0 bg-black/80 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                         <span className="text-[10px] uppercase tracking-widest text-white border border-white/20 px-3 py-1 rounded">View Asset</span>
-                     </div>
-                 </div>
-             ))}
+        <div className="animate-fade-in">
+            {lightbox}
+
+            <div className="flex items-center justify-between mb-4 gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                    <div className="text-[10px] font-mono uppercase tracking-widest text-gray-500">
+                        IMAGES: <span className="text-gray-200">{filtered.length}</span>
+                    </div>
+                    <div className="hidden md:block text-[10px] font-mono uppercase tracking-widest text-gray-600 truncate">
+                        SEARCHES TITLE / CAPTION / PROMPT / FILENAME
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                    <select
+                        value={kind}
+                        onChange={(e) => setKind(e.target.value)}
+                        className={S.input + " text-xs w-[160px] py-2"}
+                        title="Filter by kind"
+                    >
+                        {kinds.map((k) => (
+                            <option key={k} value={k}>{k.toUpperCase()}</option>
+                        ))}
+                    </select>
+
+                    <input
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        className={S.input + " w-[260px] text-xs"}
+                        placeholder="Search gallery..."
+                    />
+
+                    <button
+                        onClick={() => setHideNpcPortraits(p => !p)}
+                        className={S.btnSecondary}
+                        title="Toggle hiding NPC portraits"
+                    >
+                        {hideNpcPortraits ? <EyeOff size={14}/> : <Eye size={14}/>} {hideNpcPortraits ? "Show NPC" : "Hide NPC"}
+                    </button>
+
+                    <button
+                        onClick={fetchAssets}
+                        className={S.btnSecondary}
+                        title="Refresh gallery"
+                    >
+                        <RefreshCw size={14} className={refreshing ? "animate-spin" : ""}/> Refresh
+                    </button>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {loading ? (
+                    <div className="col-span-full text-gray-500 font-mono text-sm tracking-widest flex items-center gap-2">
+                        <RefreshCw size={14} className="animate-spin" /> Loading Assets...
+                    </div>
+                ) : filtered.length === 0 ? (
+                    <div className="col-span-full text-center text-gray-500 font-mono text-sm tracking-widest">
+                        No campaign images found yet.
+                    </div>
+                ) : filtered.map((a, i) => {
+                    const title = deriveTitle(a);
+                    const k = normalizeKind(a);
+                    const created = deriveCreatedAt(a);
+                    const creator = deriveCreator(a);
+                    const caption = deriveCaption(a);
+                    const prompt = derivePrompt(a);
+                    const contextText = (caption || prompt || "").toString();
+
+                    const fullUrl = a?.url ? `${API_URL}${a.url}` : "";
+
+                    return (
+                        <div
+                            key={a.url || a.filename || i}
+                            onClick={() => a?.url && setSelectedAsset(a)}
+                            className="bg-[#0a0a0a] border border-[#333] rounded-xl overflow-hidden group hover:border-yellow-600/50 transition-all cursor-pointer"
+                            title={a.filename || "asset"}
+                        >
+                            <div className="h-48 relative bg-[#111] overflow-hidden">
+                                {a.url ? (
+                                    <img
+                                        src={fullUrl}
+                                        alt={a.filename || `asset-${i}`}
+                                        className="w-full h-full object-cover opacity-50 group-hover:opacity-100 transition-opacity"
+                                        onError={(e) => { try { e.target.style.display = 'none'; } catch {} }}
+                                    />
+                                ) : (
+                                    <div className="w-full h-full flex items-center justify-center text-gray-700">
+                                        <ImageIcon size={48} />
+                                    </div>
+                                )}
+
+                                <div className="absolute bottom-0 left-0 w-full p-4 bg-gradient-to-t from-black to-transparent">
+                                                                        <div className="mt-2 flex items-center gap-2 flex-wrap">
+                                        <span className="text-[10px] bg-yellow-900/40 px-2 py-1 rounded text-yellow-500 uppercase tracking-widest backdrop-blur-sm border border-yellow-500/20">
+                                            {k}
+                                        </span>
+                                        {creator && (
+                                            <span className="text-[10px] bg-white/5 px-2 py-1 rounded text-gray-400 uppercase tracking-widest border border-white/10 truncate max-w-[220px]">
+                                                {creator}
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="p-4">
+<div className="flex justify-between text-[10px] text-gray-500 mb-2 font-mono uppercase tracking-widest">
+                                    <span>{created ? "CAPTURED" : ""}</span>
+                                    <span className="text-gray-400">{created ? fmtEpoch(created) : ""}</span>
+                                </div>
+
+                                <p className="text-xs text-gray-400 leading-relaxed mb-4 whitespace-pre-wrap line-clamp-4">
+                                    {contextText || "No context captured yet."}
+                                </p>
+
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); a?.url && setSelectedAsset(a); }}
+                                        className="bg-white/5 border border-white/10 py-2 rounded text-[10px] uppercase font-bold text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                                    >
+                                        View
+                                    </button>
+
+                                    
+                                    
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); apiDeleteImage(a, false); }}
+                                        className="bg-red-900/20 border border-red-500/20 py-2 rounded text-[10px] uppercase font-bold text-red-300 hover:text-red-200 hover:bg-red-900/30 transition-colors"
+                                        disabled={replacing || deleting}
+                                        title="Delete this image"
+                                    >
+                                        {deleting ? "Deleting..." : "Delete"}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
         </div>
     )
 }
+
 
 function CharacterMatrix({ addLog, notify }) {
     // STARTING DATA
@@ -1350,8 +2897,10 @@ function CharacterMatrix({ addLog, notify }) {
         <div className="max-w-7xl mx-auto pb-20 animate-fade-in">
             <h2 className={S.header}>Hero Engine</h2>
             {/* Placeholder for future expansion */}
-            <div className={S.card}>
-                <p className="text-gray-500 text-center py-10 font-mono">Hero Matrix v2.0 Coming Soon</p>
+            <div className="bg-[#0a0a0a] border border-[#333] rounded-xl p-20 flex flex-col items-center justify-center text-center">
+                <Hammer size={48} className="text-gray-700 mb-6" />
+                <h3 className="font-cinematic text-2xl text-gray-500 mb-2">UNDER CONSTRUCTION</h3>
+                <p className="text-xs font-mono text-gray-600 uppercase tracking-widest">Hero Matrix v2.0 Coming Soon</p>
             </div>
         </div>
     )
@@ -1431,7 +2980,7 @@ function CampaignSelector({ current, onClose, onSelect, notify }) {
     useEffect(() => { axios.get(`${API_URL}/system/campaigns/list`).then(res => setList(res.data)); }, []);
     const activate = async (id) => { try { await axios.post(`${API_URL}/system/campaigns/activate`, {campaign_id: id}); onSelect(); onClose();
     } catch (e) { } };
-    const deleteCampaign = async (id) => { if(!confirm(`DELETE ${id}?`)) return; try { await axios.delete(`${API_URL}/system/campaigns/delete/${id}`);
+    const deleteCampaign = async (id) => { if (!(await rqConfirm({ title: "Delete Campaign", message: `DELETE ${id}?`, confirmText: "Delete", cancelText: "Cancel", danger: true }))) return; try { await axios.delete(`${API_URL}/system/campaigns/delete/${id}`);
     setList(p => p.filter(c => c.id !== id)); notify("Campaign Deleted"); } catch(e) { notify("Delete Failed", "error"); } };
     const consultOracle = async () => { setGenerating(true); try { const res = await axios.post(`${API_URL}/system/campaigns/forge/preview`, { concept }); setDraft(res.data);
     } catch(e) { } setGenerating(false); };
