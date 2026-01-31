@@ -191,7 +191,7 @@ const refreshData = useCallback(async () => {
               <>
 {activeTab === 'overview' && <OverviewView config={config} logs={logs} addLog={addLog} onRefresh={refreshData} notify={notify} />}
            {activeTab === 'cortex' && <CortexView notify={notify} />}
-           {activeTab === 'player' && <PlayerPortalView notify={notify} addLog={addLog} />}
+           {activeTab === 'player' && <PlayerPortalView notify={notify} addLog={addLog} config={config} />}
            {activeTab === 'settings' && <ConfigView onUpdate={refreshData} notify={notify} showLogout={systemHasPin && vaultUnlocked} onLogout={async () => { try { await axios.post(`${API_URL}/system/auth/lock`); setVaultUnlocked(false); await refreshAuth(); notify("Vault Locked"); } catch (e) { console.error("Lock error", e); notify("Failed to lock vault.", "error"); } }} />}
            {activeTab === 'audio' && <AudioMatrix config={config} onUpdate={refreshData} notify={notify} />}
            {activeTab === 'chars' && <CharacterMatrix addLog={addLog} notify={notify} />}
@@ -1174,6 +1174,10 @@ function LockScreen({ onUnlock, notify }) {
 // -------------------------------------------------------------------------
 function SystemLogsView({ notify }) {
     const [service, setService] = useState("rq-bot");
+
+
+
+
     return (
         <div className="h-full flex flex-col pb-20 animate-fade-in">
             <div className="flex justify-between items-center mb-6">
@@ -1195,13 +1199,17 @@ function SystemLogsView({ notify }) {
 // -------------------------------------------------------------------------
 // --- 5. PLAYER PORTAL (PRESERVED v17.0) ---
 // -------------------------------------------------------------------------
-function PlayerPortalView({ notify, addLog }) {
+function PlayerPortalView({ notify, addLog, config }) {
+    const campaignId = config?.active_campaign || null;
+
     const [selectedChar, setSelectedChar] = useState(null);
     const [view, setView] = useState("sheet");
 
     // Local-first lobby (Phase 4 will persist to backend)
     const [availableChars, setAvailableChars] = useState([]);
-    const [loadingChars, setLoadingChars] = useState(true);
+    const [loadingChars, setLoadingChars] = useState(false);
+    const [isDirty, setIsDirty] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
 
     const importRef = useRef(null);
 
@@ -1210,23 +1218,96 @@ function PlayerPortalView({ notify, addLog }) {
     const [createDraft, setCreateDraft] = useState({ name: "", class_name: "", race: "", level: 1 });
     const [creatingHero, setCreatingHero] = useState(false);
 
-    // A cinematic starter roster so the Player Portal is usable immediately
+    
+    // Load heroes for the active campaign (no polling; explicit Save button controls persistence)
     useEffect(() => {
-        const starter = [
-            { id: "starter_valerius", name: "Valerius The Void", class_name: "Warlock", level: 5, race: "Human", hp: "34", hp_max: "42", ac: "14", init: "+2", speed: "30", stats: { STR: 10, DEX: 14, CON: 16, INT: 12, WIS: 10, CHA: 18 } },
-            { id: "starter_kaelen", name: "Kaelen Stonefist", class_name: "Paladin", level: 5, race: "Dwarf", hp: "45", hp_max: "45", ac: "18", init: "0", speed: "25", stats: { STR: 16, DEX: 10, CON: 16, INT: 8, WIS: 12, CHA: 14 } },
-            { id: "starter_elara", name: "Elara Moonwhisper", class_name: "Rogue", level: 4, race: "Elf", hp: "28", hp_max: "28", ac: "15", init: "+4", speed: "35", stats: { STR: 8, DEX: 18, CON: 12, INT: 14, WIS: 12, CHA: 12 } }
-        ];
-        setAvailableChars(starter);
-        setLoadingChars(false);
-    }, []);
+        let alive = true;
 
-    const normalizeChar = (c) => {
-        if (!c) return null;
+        async function load() {
+            if (!campaignId) {
+                setAvailableChars([]);
+                setLoadingChars(false);
+                return;
+            }
+
+            setLoadingChars(true);
+            try {
+                const res = await axios.get(`${API_URL}/game/characters`, { params: { campaign_id: campaignId } });
+                const items = Array.isArray(res.data) ? res.data : (res.data?.items || []);
+                if (!alive) return;
+
+                const normalized = items.map((c) => normalizeChar(c));
+                setAvailableChars(normalized);
+            } catch (e) {
+                if (alive) {
+                    setAvailableChars([]);
+                    notify(`Failed to load heroes: ${e?.message || e}`, "error");
+                }
+            } finally {
+                if (alive) setLoadingChars(false);
+            }
+        }
+
+        load();
+        return () => { alive = false; };
+    }, [campaignId]);
+
+    const normalizeChar = (raw) => {
+        const sheet = raw?.sheet || {};
+        const stats =
+            sheet?.stats ||
+            raw?.stats || {
+                STR: 10,
+                DEX: 10,
+                CON: 10,
+                INT: 10,
+                WIS: 10,
+                CHA: 10,
+            };
+
+        const combat = sheet?.combat || {};
+        const hpMax = combat?.hp?.max ?? raw?.hp_max ?? 10;
+        const hpCur = combat?.hp?.current ?? raw?.hp ?? hpMax;
+        const ac = combat?.ac ?? raw?.ac ?? 10;
+        const init = combat?.initiative ?? raw?.init ?? "+0";
+        const speed = combat?.speed ?? raw?.speed ?? 30;
+
+        const avatarUrl = raw?.avatar_url || sheet?.avatar_url || sheet?.portrait?.url || null;
+
         return {
-            ...c,
-            id: c.id || c.character_id || `hero_${Date.now()}`,
-            level: Number(c.level || 1),
+            id: raw?.character_id || raw?.id || `hero_${Math.random().toString(36).slice(2)}`,
+            character_id: raw?.character_id || raw?.id || null,
+            campaign_id: raw?.campaign_id || campaignId,
+            name: raw?.name || "Unnamed Hero",
+            role: raw?.role || "Player",
+            class_name: raw?.class_name || raw?.class || "Adventurer",
+            race: raw?.race || "Unknown",
+            level: raw?.level || 1,
+            owner_discord_id: raw?.owner_discord_id || null,
+            owner_display_name: raw?.owner_display_name || null,
+            avatar_url: avatarUrl,
+            portrait: avatarUrl ? { url: avatarUrl } : { url: null },
+            stats,
+            hp: hpCur,
+            hp_max: hpMax,
+            ac,
+            init,
+            speed,
+            sheet: {
+                ...sheet,
+                stats,
+                combat: {
+                    ...(sheet?.combat || {}),
+                    ac,
+                    initiative: init,
+                    speed,
+                    hp: {
+                        ...(sheet?.combat?.hp || {}),
+                        max: hpMax,
+                        current: hpCur,
+                    },
+                },
+            },
         };
     };
 
@@ -1239,31 +1320,43 @@ function PlayerPortalView({ notify, addLog }) {
 
     const createHero = async () => {
         const name = (createDraft.name || "").trim();
+        if (!campaignId) {
+            notify?.("No active campaign configured. Set an active campaign in Admin → Neural Config.", "error");
+            return;
+        }
         if (!name) {
             notify?.("Hero name required.", "error");
             return;
         }
+
         setCreatingHero(true);
         try {
-            const hero = normalizeChar({
-                id: `hero_${Date.now()}`,
+            const payload = {
+                campaign_id: campaignId,
                 name,
-                class_name: (createDraft.class_name || "").trim(),
-                race: (createDraft.race || "").trim(),
+                class_name: (createDraft.class_name || "").trim() || "Adventurer",
+                race: (createDraft.race || "").trim() || "Unknown",
                 level: Number(createDraft.level || 1),
-                hp: "0",
-                hp_max: "0",
-                ac: "10",
-                init: "0",
-                speed: "30",
-                stats: { STR: 10, DEX: 10, CON: 10, INT: 10, WIS: 10, CHA: 10 }
-            });
+                sheet: {
+                    bio: { backstory: "", traits: "" },
+                    stats: { STR: 10, DEX: 10, CON: 10, INT: 10, WIS: 10, CHA: 10 },
+                    combat: { ac: 10, initiative: "+0", speed: 30, hp: { max: 10, current: 10 } },
+                    notes: { misc: "" },
+                },
+            };
 
-            setAvailableChars(prev => [hero, ...prev]);
-            setSelectedChar(hero);
+            const res = await axios.post(`${API_URL}/game/characters`, payload);
+            const created = normalizeChar(res?.data?.character || res?.data);
+
+            setAvailableChars(prev => [created, ...prev]);
+            setSelectedChar(created);
             setView("sheet");
+            setIsDirty(false);
+
             notify?.("Hero forged.", "info");
-            addLog?.("PLAYER", `Hero created: ${hero.name}`);
+            addLog?.("PLAYER", `Hero created: ${created.name}`);
+        } catch (e) {
+            notify?.(`Failed to forge hero: ${e?.message || e}`, "error");
         } finally {
             setCreatingHero(false);
             setShowCreateHero(false);
@@ -1279,36 +1372,41 @@ function PlayerPortalView({ notify, addLog }) {
         const file = e?.target?.files?.[0];
         if (!file) return;
 
+        if (!campaignId) {
+            notify?.("No active campaign configured. Set an active campaign in Admin → Neural Config.", "error");
+            return;
+        }
+
         try {
             const text = await file.text();
             const parsed = JSON.parse(text);
 
-            // Accept either a single hero object or a wrapper like { hero: {...} }
-            const heroRaw =
-                parsed?.hero ? parsed.hero :
-                parsed?.character ? parsed.character :
-                parsed;
+            // Accept either a single hero object or a wrapper like { hero: {...} } or { character: {...} }
+            const heroRaw = parsed?.hero ? parsed.hero : parsed?.character ? parsed.character : parsed;
 
             if (!heroRaw || typeof heroRaw !== "object") throw new Error("Invalid hero JSON.");
 
-            const hero = normalizeChar({
+            const res = await axios.post(`${API_URL}/game/characters/import`, {
                 ...heroRaw,
-                id: heroRaw.id || heroRaw.character_id || `import_${Date.now()}`
+                campaign_id: heroRaw?.campaign_id || campaignId,
             });
 
-            if (!hero.name) {
-                notify?.("Imported hero JSON missing name.", "error");
-                return;
-            }
+            const imported = normalizeChar(res?.data?.character || res?.data?.hero || res?.data);
+            if (!imported?.name) throw new Error("Imported hero missing name.");
 
-            setAvailableChars(prev => [hero, ...prev]);
-            setSelectedChar(hero);
+            setAvailableChars((prev) => [imported, ...prev]);
+            setSelectedChar(imported);
             setView("sheet");
+            setIsDirty(false);
+
             notify?.("Hero imported.", "info");
-            addLog?.("PLAYER", `Hero imported: ${hero.name}`);
+            addLog?.("PLAYER", `Hero imported: ${imported.name}`);
         } catch (err) {
             console.error(err);
-            notify?.("Failed to import hero JSON.", "error");
+            notify?.(`Failed to import hero JSON: ${err?.message || err}`, "error");
+        } finally {
+            // allow re-importing the same file
+            if (e?.target) e.target.value = "";
         }
     };
 
@@ -1378,7 +1476,7 @@ function PlayerPortalView({ notify, addLog }) {
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
                         {availableChars.map((c, idx) => (
-                            <div key={c.id || idx} onClick={() => { setSelectedChar(normalizeChar(c)); setView("sheet"); }} className="bg-[#0a0a0a] border border-[#333] rounded-xl p-8 hover:border-yellow-600 hover:scale-105 transition-all cursor-pointer group relative overflow-hidden w-64 text-center">
+                            <div key={c.id || idx} onClick={() => { setSelectedChar(normalizeChar(c)); setView("sheet"); setIsDirty(false); }} className="bg-[#0a0a0a] border border-[#333] rounded-xl p-8 hover:border-yellow-600 hover:scale-105 transition-all cursor-pointer group relative overflow-hidden w-64 text-center">
                                 <div className="w-24 h-24 mx-auto bg-black rounded-full border-2 border-[#444] flex items-center justify-center mb-6 group-hover:border-yellow-600 transition-colors shadow-[0_0_30px_rgba(0,0,0,0.5)] overflow-hidden">
                                     <span className="font-cinematic text-4xl text-gray-500 group-hover:text-yellow-600 transition-colors">{(c.name || "?").charAt(0)}</span>
                                 </div>
@@ -1398,13 +1496,79 @@ function PlayerPortalView({ notify, addLog }) {
 
     // UPDATE HANDLER (local for now)
     const updateChar = (field, value) => {
-        setSelectedChar(prev => ({ ...prev, [field]: value }));
+        setSelectedChar((prev) => {
+            if (!prev) return prev;
+
+            const next = { ...prev, [field]: value };
+            const prevSheet = prev.sheet || {};
+
+            // Keep the persisted sheet in sync with the UI model
+            if (field === "stats") {
+                next.sheet = { ...prevSheet, stats: value };
+            } else if (["hp", "hp_max", "ac", "init", "speed"].includes(field)) {
+                const combatPrev = prevSheet.combat || {};
+                const hpPrev = combatPrev.hp || {};
+                next.sheet = {
+                    ...prevSheet,
+                    combat: {
+                        ...combatPrev,
+                        ac: next.ac ?? combatPrev.ac,
+                        initiative: next.init ?? combatPrev.initiative,
+                        speed: next.speed ?? combatPrev.speed,
+                        hp: {
+                            ...hpPrev,
+                            max: next.hp_max ?? hpPrev.max,
+                            current: next.hp ?? hpPrev.current,
+                        },
+                    },
+                };
+            }
+
+            return next;
+        });
+
+        setIsDirty(true);
     };
+
+
+    const saveHero = async () => {
+        if (!selectedChar?.character_id) return;
+
+        setIsSaving(true);
+        try {
+            const payload = {
+                name: selectedChar.name,
+                campaign_id: selectedChar.campaign_id || campaignId,
+                level: selectedChar.level,
+                class_name: selectedChar.class_name,
+                race: selectedChar.race,
+                owner_discord_id: selectedChar.owner_discord_id ?? null,
+                owner_display_name: selectedChar.owner_display_name ?? null,
+                avatar_url: selectedChar.avatar_url ?? null,
+                sheet: selectedChar.sheet || {},
+            };
+
+            const res = await axios.put(`${API_URL}/game/characters/${selectedChar.character_id}`, payload);
+            const saved = normalizeChar(res?.data?.character || res?.data);
+
+            setSelectedChar(saved);
+            setAvailableChars((prev) => prev.map((c) => (c.character_id === saved.character_id ? saved : c)));
+            setIsDirty(false);
+
+            notify?.(`Hero saved: ${saved.name}`, "success");
+        } catch (e) {
+            console.error("saveHero failed", e);
+            notify?.("Hero save failed. Check API logs.", "error");
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
 
     return (
         <div className="max-w-7xl mx-auto pb-20 animate-fade-in h-full flex flex-col">
             {createHeroModal}
-            <PlayerHeader char={selectedChar} onUpdate={updateChar} onLogout={() => setSelectedChar(null)} notify={notify} />
+            <PlayerHeader char={selectedChar} onUpdate={updateChar} onLogout={() => setSelectedChar(null)} notify={notify} onSave={saveHero} isDirty={isDirty} isSaving={isSaving} />
 
             {/* NAVIGATION TABS */}
             <div className="flex border-b border-[#222] mb-6 overflow-x-auto custom-scrollbar">
@@ -1434,7 +1598,7 @@ function PlayerPortalView({ notify, addLog }) {
 
 
 // --- SUB-COMPONENT: PLAYER HEADER (AVATAR & DISCORD) ---
-function PlayerHeader({ char, onUpdate, onLogout, notify }) {
+function PlayerHeader({ char, onUpdate, onLogout, notify, onSave, isDirty, isSaving }) {
     const [discordId, setDiscordId] = useState(char.owner_discord_id ? char.owner_discord_id : "Link Discord");
     const [isEditingDiscord, setIsEditingDiscord] = useState(false);
     const fileInputRef = useRef(null);
@@ -1507,6 +1671,7 @@ function PlayerHeader({ char, onUpdate, onLogout, notify }) {
         }
     };
 
+
     return (
         <div className="flex justify-between items-end mb-8 bg-[#111] p-6 rounded-xl border border-[#333] relative overflow-hidden shadow-2xl">
             <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileChange} />
@@ -1563,7 +1728,21 @@ function PlayerHeader({ char, onUpdate, onLogout, notify }) {
                     <button onClick={downloadTemplate} className="text-[10px] bg-sky-900/30 text-sky-400 border border-sky-500/30 px-3 py-1 rounded hover:bg-sky-500 hover:text-white transition-all uppercase tracking-widest flex items-center gap-2">
                         <Scroll size={12} /> Template
                     </button>
-                    
+
+            <button
+              onClick={onSave}
+              disabled={!isDirty || isSaving}
+              className={`text-[10px] px-3 py-1 rounded uppercase tracking-widest flex items-center gap-2 border transition-all ${
+                !isDirty
+                  ? "bg-emerald-900/10 text-emerald-400/50 border-emerald-500/10 cursor-default"
+                  : isSaving
+                  ? "bg-emerald-900/30 text-emerald-400 border-emerald-500/30 opacity-70 cursor-wait"
+                  : "bg-emerald-900/30 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500 hover:text-white"
+              }`}
+            >
+              <Save size={12} /> {isSaving ? "Saving…" : isDirty ? "Save" : "Saved"}
+            </button>
+
                     <button onClick={onLogout} className="text-[10px] bg-red-900/30 text-red-500 border border-red-500/30 px-3 py-1 rounded hover:bg-red-500 hover:text-white transition-all uppercase tracking-widest">
                         Exit Portal
                     </button>
@@ -2880,10 +3059,10 @@ function ArtGallery({ notify }) {
 
 
 function CharacterMatrix({ addLog, notify }) {
+    const [roster, setRoster] = useState([]);
+
     // STARTING DATA
     const [view, setView] = useState("list");
-    const [roster, setRoster] = useState([]);
-    
     // FETCH (Mocked for now)
     useEffect(() => {
          // axios.get...
