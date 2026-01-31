@@ -4,8 +4,8 @@
 //Date: 01/31/2026
 //Created By: T03KNEE
 //Github: https://github.com/To3Knee/RealmQuest
-//Version: 18.8.22
-//About: Phase 3.8.5 - Split-brain hardening + bot-aware shared roll feed (no UI/theme/layout drift).
+//Version: 18.8.24
+//About: Dice Engine polish - server-side clear, stat footer, dihedral icons, 7-wide dice row (no UI/theme/layout drift).
 //===============================================================
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
@@ -1961,6 +1961,81 @@ function DiceEngine({ notify, char }) {
     const [attribute, setAttribute] = useState("");
     const [bonus, setBonus] = useState(0);
 
+    // DIHEDRAL DIE ICONS (pure SVG, inherits currentColor)
+    const DieIcon = ({ sides, className = "", size = 24 }) => {
+        const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.6", strokeLinecap: "round", strokeLinejoin: "round", className };
+        switch (Number(sides)) {
+            case 4:
+                return (
+                    <svg {...common}>
+                        <path d="M12 3 L20 19 L4 19 Z" />
+                        <path d="M12 3 L12 19" />
+                        <path d="M4 19 L12 12 L20 19" />
+                    </svg>
+                );
+            case 6:
+                return (
+                    <svg {...common}>
+                        <rect x="5" y="5" width="14" height="14" rx="2" />
+                        <path d="M8 8 L16 16" />
+                        <path d="M16 8 L8 16" />
+                    </svg>
+                );
+            case 8:
+                return (
+                    <svg {...common}>
+                        <path d="M12 3 L20 12 L12 21 L4 12 Z" />
+                        <path d="M12 3 L12 21" />
+                        <path d="M4 12 L20 12" />
+                    </svg>
+                );
+            case 10:
+                return (
+                    <svg {...common}>
+                        <path d="M12 3 L19 9 L16 21 L8 21 L5 9 Z" />
+                        <path d="M12 3 L12 21" />
+                        <path d="M5 9 L19 9" />
+                    </svg>
+                );
+            case 12:
+                return (
+                    <svg {...common}>
+                        <path d="M12 2.8 L20 7.8 L20 16.2 L12 21.2 L4 16.2 L4 7.8 Z" />
+                        <path d="M12 2.8 L12 21.2" />
+                        <path d="M4 7.8 L20 7.8" />
+                    </svg>
+                );
+            case 20:
+                return (
+                    <svg {...common}>
+                        <path d="M12 2.5 L20 7.5 L20 16.5 L12 21.5 L4 16.5 L4 7.5 Z" />
+                        <path d="M12 2.5 L12 21.5" />
+                        <path d="M4 7.5 L12 12 L20 7.5" />
+                        <path d="M4 16.5 L12 12 L20 16.5" />
+                    </svg>
+                );
+            case 100:
+                return (
+                    <svg {...common}>
+                        <circle cx="12" cy="12" r="9" />
+                        <path d="M8 9 L8 15" />
+                        <path d="M12 9 L12 15" />
+                        <path d="M16 10.2 C14.8 9.2 13.2 9.2 12 10.2 C10.8 11.2 10.8 12.8 12 13.8 C13.2 14.8 14.8 14.8 16 13.8" />
+                    </svg>
+                );
+            default:
+                return (
+                    <svg {...common}>
+                        <path d="M6 6 H18 V18 H6 Z" />
+                    </svg>
+                );
+        }
+    };
+
+
+    
+
+
     const fetchRollFeed = useCallback(async () => {
         try {
             const res = await axios.get(`${API_URL}/game/rolls?limit=75`);
@@ -1974,6 +2049,12 @@ function DiceEngine({ notify, char }) {
                 attribute: ev.attribute || null,
                 grandTotal: ev.grand_total ?? ev.grandTotal ?? 0,
                 diceCount: ev.dice_count ?? ev.diceCount ?? 1,
+                roll_type: ev.roll_type || ev._roll_type || null,
+                notation: ev.notation || ev._notation || null,
+                context: ev.context || ev._context || null,
+                kept: Array.isArray(ev.kept) ? ev.kept : [],
+                dropped: Array.isArray(ev.dropped) ? ev.dropped : [],
+                expression: ev.expression || null,
                 created_at_epoch: ev.created_at_epoch || null,
                 ts: (ev.created_at ? String(ev.created_at).split(' ')[1] : null) || new Date().toLocaleTimeString([], {hour12: false}),
                 who: ev.player_name || ev.character_name || ev.owner_discord_id || null,
@@ -2012,63 +2093,162 @@ function DiceEngine({ notify, char }) {
         });
     }, [sharedFeed, history]);
 
-    const roll = async (sides) => {
-        setRolling(sides);
-        await new Promise(r => setTimeout(r, 600)); // Animation
-        
-        // LOGIC: MULTI-ROLL & SUM
-        let rolls = [];
-        let total = 0;
-        
-        for(let i=0; i < diceCount; i++) {
-            let r = Math.floor(Math.random() * sides) + 1;
-            rolls.push(r);
-            total += r;
-        }
-
-        const grandTotal = total + parseInt(modifier) + parseInt(bonus);
-        
-        const newLog = { 
-            roll_id: null,
-            sides, rolls, modifier, bonus, attribute, grandTotal, diceCount,
-            created_at_epoch: (Date.now() / 1000),
-            ts: new Date().toLocaleTimeString([], {hour12: false}),
-            who: (char?.owner_display_name || char?.name || char?.owner_discord_id || null),
-            _source: 'local'
+        const roll = async (sides) => {
+            setRolling(sides);
+            await new Promise(r => setTimeout(r, 600)); // Animation
+    
+            // LOGIC: MULTI-ROLL & SUM (+ ADV/DIS for d20 when diceCount=1)
+            let rolls = [];
+            let total = 0;
+    
+            const modInt = parseInt(modifier) || 0;
+            const bonusInt = parseInt(bonus) || 0;
+    
+            let notationBase = `${diceCount}d${sides}`;
+            let keptTotal = 0;
+    
+            const useAdv = (sides === 20 && diceCount === 1 && advantage && advantage !== "normal");
+    
+            if (useAdv) {
+                const r1 = Math.floor(Math.random() * sides) + 1;
+                const r2 = Math.floor(Math.random() * sides) + 1;
+                rolls = [r1, r2];
+    
+                if (advantage === "adv") {
+                    keptTotal = Math.max(r1, r2);
+                    notationBase = `2d20kh1`;
+                } else if (advantage === "dis") {
+                    keptTotal = Math.min(r1, r2);
+                    notationBase = `2d20kl1`;
+                } else {
+                    keptTotal = r1;
+                }
+                total = keptTotal;
+            } else {
+                for (let i = 0; i < diceCount; i++) {
+                    const r = Math.floor(Math.random() * sides) + 1;
+                    rolls.push(r);
+                    total += r;
+                }
+                keptTotal = total;
+            }
+    
+            const grandTotal = keptTotal + modInt + bonusInt;
+            const notationFull = `${notationBase}${modInt ? ((modInt > 0 ? '+' : '') + modInt) : ''}${bonusInt ? ((bonusInt > 0 ? '+' : '') + bonusInt) : ''}`;
+    
+            const newLog = { 
+                roll_id: null,
+                sides, rolls, modifier, bonus, attribute, grandTotal, diceCount,
+                created_at_epoch: (Date.now() / 1000),
+                ts: new Date().toLocaleTimeString([], {hour12: false}),
+                who: (char?.owner_display_name || char?.name || char?.owner_discord_id || null),
+                roll_type: 'custom',
+                notation: notationFull,
+                _roll_type: 'custom',
+                _notation: notationFull,
+                _source: 'local'
+            };
+    
+            setHistory(prev => [newLog, ...prev]);
+    
+            // Back-end hook (so bot/AI can be aware of rolls)
+            try {
+                const notation = notationFull;
+                const res = await axios.post(`${API_URL}/game/roll`, {
+                    character_id: char?.character_id || null,
+                    character_name: char?.name || null,
+                    owner_discord_id: char?.owner_discord_id || null,
+                    player_name: char?.owner_display_name || null,
+                    dice_count: diceCount,
+                    sides,
+                    modifier: modInt,
+                    bonus: bonusInt,
+                    attribute: attribute || null,
+                    rolls,
+                    grand_total: grandTotal,
+                    roll_type: 'custom',
+                    notation,
+                });
+                const ev = res?.data;
+                if (ev?.roll_id) {
+                    setHistory(prev => prev.map((h, idx) => idx === 0 ? { ...h, roll_id: ev.roll_id, created_at_epoch: ev.created_at_epoch || h.created_at_epoch } : h));
+                    fetchRollFeed();
+                }
+            } catch (e) {
+                // Silent: never interrupt gameplay UI for telemetry failures
+                console.error(e);
+            }
+            setRolling(false);
         };
-        
-        setHistory(prev => [newLog, ...prev]);
 
-        // Back-end hook (so bot/AI can be aware of rolls)
+    const rollStatsBlock = async () => {
+        setRolling('stats');
+        await new Promise(r => setTimeout(r, 450)); // subtle UX sync with dice animation
+
         try {
-            const res = await axios.post(`${API_URL}/game/roll`, {
+            const res = await axios.post(`${API_URL}/game/roll/stats`, {
                 character_id: char?.character_id || null,
                 character_name: char?.name || null,
                 owner_discord_id: char?.owner_discord_id || null,
                 player_name: char?.owner_display_name || null,
-                dice_count: diceCount,
-                sides,
-                modifier: parseInt(modifier) || 0,
-                bonus: parseInt(bonus) || 0,
-                attribute: attribute || null,
-                rolls,
-                grand_total: grandTotal,
-                roll_type: 'custom',
-                notation: `${diceCount}d${sides}${(parseInt(modifier)||0) ? ((parseInt(modifier)>0?'+':'')+parseInt(modifier)) : ''}${(parseInt(bonus)||0) ? ((parseInt(bonus)>0?'+':'')+parseInt(bonus)) : ''}`,
+                method: '4d6dl1',
+                stats: 6,
+                roll_type: 'stat_block',
+                visibility: 'public',
             });
+
             const ev = res?.data;
             if (ev?.roll_id) {
-                setHistory(prev => prev.map((h, idx) => idx === 0 ? { ...h, roll_id: ev.roll_id, created_at_epoch: ev.created_at_epoch || h.created_at_epoch } : h));
+                const newLog = {
+                    roll_id: ev.roll_id,
+                    sides: 6,
+                    diceCount: 4,
+                    rolls: [],
+                    modifier: 0,
+                    bonus: 0,
+                    attribute: null,
+                    grandTotal: ev.grand_total,
+                    created_at_epoch: ev.created_at_epoch || (Date.now() / 1000),
+                    ts: new Date().toLocaleTimeString([], { hour12: false }),
+                    who: (char?.owner_display_name || char?.name || char?.owner_discord_id || null),
+                    _source: 'api',
+                    roll_type: 'stat_block',
+                    notation: ev.notation,
+                    context: ev.context,
+                    _roll_type: 'stat_block',
+                    _notation: ev.notation,
+                    _context: ev.context,
+                };
+                setHistory(prev => [newLog, ...prev]);
                 fetchRollFeed();
             }
         } catch (e) {
-            // Silent: never interrupt gameplay UI for telemetry failures
             console.error(e);
         }
+
         setRolling(false);
     };
 
-    const clearHistory = async () => { if (await rqConfirm({ title: "Clear Roll Log", message: "Clear Roll Log?", confirmText: "Clear", cancelText: "Cancel", danger: true })) setHistory([]); };
+
+
+    const clearHistory = async () => {
+        const ok = await rqConfirm({ title: "Clear Roll Log", message: "Clear Roll Log?", confirmText: "Clear", cancelText: "Cancel", danger: true });
+        if (!ok) return;
+        try {
+            try {
+                await axios.post(`${API_URL}/game/rolls/clear`);
+            } catch (err) {
+                // Fallback for environments that do not allow DELETE from the browser
+                await axios.delete(`${API_URL}/game/rolls`);
+            }
+            setSharedFeed([]);
+            setHistory([]);
+            notify && notify("Roll log cleared.");
+        } catch (e) {
+            console.error("clear rolls failed", e);
+            notify && notify("Failed to clear rolls.");
+        }
+    };
 
     return (
         <div className="h-full grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in">
@@ -2089,7 +2269,22 @@ function DiceEngine({ notify, char }) {
                                     {history[0].grandTotal}
                                 </div>
                                 <div className="text-gray-500 font-mono mt-4 text-sm">
-                                    [{history[0].rolls.join(', ')}] {history[0].modifier > 0 && `+ ${history[0].modifier}`} {history[0].bonus > 0 && `+ ${history[0].bonus}`}
+                                    {(() => {
+                                        const h = history[0] || {};
+                                        const rt = h.roll_type || h._roll_type;
+                                        const nt = h.notation || h._notation;
+                                        const ctx = h.context || h._context;
+                                        const rolls = Array.isArray(h.rolls) ? h.rolls : [];
+                                        const hasRolls = rolls.length > 0;
+                                        if (rt === "stat_block") {
+                                            const totals = ctx?.totals;
+                                            return totals && Array.isArray(totals) ? `STAT BLOCK: ${totals.join(", ")}` : (nt || "STAT BLOCK");
+                                        }
+                                        if (!hasRolls) return (nt || "");
+                                        const mod = (h.modifier ?? 0);
+                                        const bon = (h.bonus ?? 0);
+                                        return `[${rolls.join(", ")}]${mod > 0 ? ` + ${mod}` : ""}${bon > 0 ? ` + ${bon}` : ""}`;
+                                    })()}
                                 </div>
                             </div>
                         ) : <div className="text-gray-600 font-cinematic text-xl">FATE AWAITS</div>
@@ -2127,13 +2322,38 @@ function DiceEngine({ notify, char }) {
                         </div>
                     </div>
 
-                    {/* DICE ROW */}
-                    <div className="grid grid-cols-6 gap-4">
-                        {[4,6,8,10,12,20].map(d => (
+                                        {/* ROLL MODE */}
+                    <div className="flex items-center justify-between gap-3 mt-4 mb-4">
+                        <div className="flex items-center gap-2">
+                            <span className="text-[10px] uppercase tracking-widest text-gray-500">Mode</span>
+                            <select
+                                value={advantage}
+                                onChange={(e) => setAdvantage(e.target.value)}
+                                className="bg-[#0a0a0a] border border-[#333] rounded px-2 py-1 text-xs text-gray-200"
+                            >
+                                <option value="normal">Normal</option>
+                                <option value="adv">Advantage (d20)</option>
+                                <option value="dis">Disadvantage (d20)</option>
+                            </select>
+                        </div>
+
+                        <button
+                            onClick={rollStatsBlock}
+                            disabled={rolling}
+                            className="bg-[#0a0a0a] border border-[#333] rounded px-3 py-2 text-xs text-gray-200 hover:bg-[#111]"
+                            title="Roll 6 stats using 4d6, drop lowest"
+                        >
+                            Roll Stats
+                        </button>
+                    </div>
+
+{/* DICE ROW */}
+                    <div className="grid grid-cols-4 sm:grid-cols-7 gap-4">
+                        {[4,6,8,10,12,20,100].map(d => (
                             <button key={d} onClick={() => roll(d)} disabled={rolling} className="group relative">
                                 <div className="absolute inset-0 bg-gradient-to-br from-yellow-600/20 to-transparent opacity-0 group-hover:opacity-100 rounded-lg transition-opacity" />
                                 <div className="bg-[#1a1a1a] border border-[#333] rounded-lg p-4 flex flex-col items-center gap-2 group-hover:border-yellow-600 group-hover:-translate-y-1 transition-all shadow-lg">
-                                    <Dices className="text-gray-600 group-hover:text-yellow-500 transition-colors" size={24} />
+                                    <DieIcon sides={d} className="text-gray-600 group-hover:text-yellow-500 transition-colors" size={24} />
                                     <span className="font-cinematic text-sm text-gray-400 group-hover:text-white">d{d}</span>
                                 </div>
                             </button>
