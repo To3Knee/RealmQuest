@@ -4,8 +4,8 @@
 //Date: 01/31/2026
 //Created By: T03KNEE
 //Github: https://github.com/To3Knee/RealmQuest
-//Version: 18.8.21
-//About: Phase 3.8.4 - Vision Archive polish: remove title from thumbnail cards; avoid duplicate title in View modal; keep View+Delete only; no UI/theme drift.
+//Version: 18.8.22
+//About: Phase 3.8.5 - Split-brain hardening + bot-aware shared roll feed (no UI/theme/layout drift).
 //===============================================================
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
@@ -1587,7 +1587,7 @@ function PlayerPortalView({ notify, addLog, config }) {
 
             <div className="flex-1 overflow-auto custom-scrollbar p-2">
                 {view === 'sheet' && <CharacterSheet5e char={selectedChar} onUpdate={updateChar} notify={notify} />}
-                {view === 'dice' && <DiceEngine notify={notify} />}
+                {view === 'dice' && <DiceEngine notify={notify} char={selectedChar} />}
                 {view === 'notes' && <Grimoire notify={notify} />}
                 {view === 'gallery' && <ArtGallery />}
                 {view === 'npc' && <NPCCodex />}
@@ -1950,7 +1950,8 @@ function FeatureBlock({ title, desc }) {
 
 // --- SUB-COMPONENT: TACTICAL DICE ENGINE ---
 function DiceEngine({ notify, char }) {
-    const [history, setHistory] = useState([]);
+    const [history, setHistory] = useState([]); // local (this client) rolls
+    const [sharedFeed, setSharedFeed] = useState([]); // campaign-wide roll feed (from API)
     const [rolling, setRolling] = useState(false);
     
     // TACTICAL CONFIG
@@ -1959,6 +1960,57 @@ function DiceEngine({ notify, char }) {
     const [advantage, setAdvantage] = useState("normal"); // normal, adv, dis
     const [attribute, setAttribute] = useState("");
     const [bonus, setBonus] = useState(0);
+
+    const fetchRollFeed = useCallback(async () => {
+        try {
+            const res = await axios.get(`${API_URL}/game/rolls?limit=75`);
+            const rows = Array.isArray(res.data) ? res.data : [];
+            const mapped = rows.map(ev => ({
+                roll_id: ev.roll_id || null,
+                sides: ev.sides,
+                rolls: Array.isArray(ev.rolls) ? ev.rolls : [],
+                modifier: ev.modifier ?? 0,
+                bonus: ev.bonus ?? 0,
+                attribute: ev.attribute || null,
+                grandTotal: ev.grand_total ?? ev.grandTotal ?? 0,
+                diceCount: ev.dice_count ?? ev.diceCount ?? 1,
+                created_at_epoch: ev.created_at_epoch || null,
+                ts: (ev.created_at ? String(ev.created_at).split(' ')[1] : null) || new Date().toLocaleTimeString([], {hour12: false}),
+                who: ev.player_name || ev.character_name || ev.owner_discord_id || null,
+                _source: 'shared',
+            }));
+            setSharedFeed(mapped);
+        } catch (e) {
+            // Silent: never break gameplay if feed is unavailable
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchRollFeed();
+        const t = setInterval(fetchRollFeed, 2000);
+        return () => clearInterval(t);
+    }, [fetchRollFeed]);
+
+    const mergedHistory = useMemo(() => {
+        const seen = new Set();
+        const out = [];
+        const push = (h) => {
+            const rid = h?.roll_id;
+            if (rid) {
+                if (seen.has(rid)) return;
+                seen.add(rid);
+            }
+            out.push(h);
+        };
+        // Prefer shared feed ordering by server time; local entries still appear even if API fails.
+        (sharedFeed || []).forEach(push);
+        (history || []).forEach(push);
+        return out.sort((a, b) => {
+            const ae = a?.created_at_epoch || 0;
+            const be = b?.created_at_epoch || 0;
+            return be - ae;
+        });
+    }, [sharedFeed, history]);
 
     const roll = async (sides) => {
         setRolling(sides);
@@ -1977,17 +2029,23 @@ function DiceEngine({ notify, char }) {
         const grandTotal = total + parseInt(modifier) + parseInt(bonus);
         
         const newLog = { 
+            roll_id: null,
             sides, rolls, modifier, bonus, attribute, grandTotal, diceCount,
-            ts: new Date().toLocaleTimeString([], {hour12: false}) 
+            created_at_epoch: (Date.now() / 1000),
+            ts: new Date().toLocaleTimeString([], {hour12: false}),
+            who: (char?.owner_display_name || char?.name || char?.owner_discord_id || null),
+            _source: 'local'
         };
         
         setHistory(prev => [newLog, ...prev]);
 
         // Back-end hook (so bot/AI can be aware of rolls)
         try {
-            await axios.post(`${API_URL}/game/roll`, {
+            const res = await axios.post(`${API_URL}/game/roll`, {
                 character_id: char?.character_id || null,
+                character_name: char?.name || null,
                 owner_discord_id: char?.owner_discord_id || null,
+                player_name: char?.owner_display_name || null,
                 dice_count: diceCount,
                 sides,
                 modifier: parseInt(modifier) || 0,
@@ -1995,7 +2053,14 @@ function DiceEngine({ notify, char }) {
                 attribute: attribute || null,
                 rolls,
                 grand_total: grandTotal,
+                roll_type: 'custom',
+                notation: `${diceCount}d${sides}${(parseInt(modifier)||0) ? ((parseInt(modifier)>0?'+':'')+parseInt(modifier)) : ''}${(parseInt(bonus)||0) ? ((parseInt(bonus)>0?'+':'')+parseInt(bonus)) : ''}`,
             });
+            const ev = res?.data;
+            if (ev?.roll_id) {
+                setHistory(prev => prev.map((h, idx) => idx === 0 ? { ...h, roll_id: ev.roll_id, created_at_epoch: ev.created_at_epoch || h.created_at_epoch } : h));
+                fetchRollFeed();
+            }
         } catch (e) {
             // Silent: never interrupt gameplay UI for telemetry failures
             console.error(e);
@@ -2084,16 +2149,16 @@ function DiceEngine({ notify, char }) {
                     <button onClick={clearHistory} className="text-red-900 hover:text-red-500"><Trash2 size={14} /></button>
                 </div>
                 <div className="flex-1 overflow-auto custom-scrollbar p-4 space-y-3">
-                    {history.map((h, i) => (
+                    {mergedHistory.map((h, i) => (
                         <div key={i} className="flex justify-between items-center bg-white/5 p-3 rounded border border-white/5 text-xs">
                             <div className="flex flex-col">
                                 <span className="text-yellow-600 font-bold">{h.diceCount}d{h.sides} {h.attribute && `(${h.attribute})`}</span>
-                                <span className="text-gray-500 text-[10px]">{h.ts}</span>
+                                <span className="text-gray-500 text-[10px]">{h.ts}{h.who ? ` • ${h.who}` : ""}</span>
                             </div>
                             <span className="text-white font-bold text-lg">{h.grandTotal}</span>
                         </div>
                     ))}
-                    {history.length === 0 && <div className="text-center text-gray-600 mt-10 text-xs italic">No rolls yet recorded.</div>}
+                    {mergedHistory.length === 0 && <div className="text-center text-gray-600 mt-10 text-xs italic">No rolls yet recorded.</div>}
                 </div>
             </div>
         </div>

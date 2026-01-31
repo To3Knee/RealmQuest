@@ -2,7 +2,7 @@
 # Script Name: characters.py
 # Script Location: /opt/RealmQuest/api/characters.py
 # Date: 2026-01-31
-# Version: 1.2.0 (GET endpoint + safe deep-merge PUT + response consistency)
+# Version: 1.2.1 (Canonical campaign id + roll engine wiring compatibility)
 # ===============================================================
 
 import os
@@ -18,6 +18,8 @@ try:
     from pymongo import MongoClient
 except Exception:
     MongoClient = None
+
+from system_config import get_active_campaign_id
 
 router = APIRouter(tags=["characters"])
 
@@ -43,16 +45,9 @@ def _get_db():
 
 
 def _get_active_campaign_id(db) -> str:
-    """Mirror of campaign_manager._get_active_campaign_id(), kept local to avoid import loops."""
-    if db is None:
-        return os.getenv("RQ_DEFAULT_CAMPAIGN", "the_collision_stone")
-    try:
-        cfg = db["system_config"].find_one({"config_id": "system"}, {"_id": 0})
-        if cfg and cfg.get("active_campaign"):
-            return str(cfg["active_campaign"])
-    except Exception:
-        pass
-    return os.getenv("RQ_DEFAULT_CAMPAIGN", "the_collision_stone")
+    """Canonical active campaign id (split-brain hardened)."""
+    return get_active_campaign_id(db, default=os.getenv("RQ_DEFAULT_CAMPAIGN", "the_collision_stone"))
+
 
 
 def _campaign_root(active_campaign: str) -> str:

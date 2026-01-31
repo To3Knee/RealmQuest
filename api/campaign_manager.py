@@ -4,7 +4,7 @@
 #Date: 01/31/2026
 #Created By: T03KNEE
 #Github: https://github.com/To3Knee/RealmQuest
-#Version: 19.13.1
+#Version: 19.13.2
 #About: Phase 3.7 Hotfix - Import missing FastAPI symbols (Query/File/UploadFile) for delete/replace routes.
 #===============================================================
 
@@ -21,6 +21,8 @@ from dotenv import dotenv_values, set_key, unset_key
 from fastapi import APIRouter, HTTPException, Body, Request, Query, UploadFile, File
 from pydantic import BaseModel
 from pymongo import MongoClient
+
+from system_config import get_active_campaign_id, set_active_campaign_id
 
 # SETUP LOGGING
 logging.basicConfig(level=logging.INFO)
@@ -66,12 +68,8 @@ class ForgeDraft(BaseModel):
 # -----------------------------
 
 def _get_active_campaign_id():
-    """Fetches active campaign from DB, defaults to 'the_collision_stone'."""
-    if db is None: return "the_collision_stone"
-    try:
-        cfg = db["system_config"].find_one({"config_id": "main"})
-        return cfg.get("active_campaign", "the_collision_stone") if cfg else "the_collision_stone"
-    except: return "the_collision_stone"
+    """Fetches active campaign from DB, defaults to 'the_collision_stone'. (Canonical)"""
+    return get_active_campaign_id(db)
 
 @router.get("/campaigns/list")
 def list_campaigns():
@@ -111,11 +109,7 @@ def activate_campaign(payload: CampaignAction):
         raise HTTPException(404, "Campaign not found on disk")
         
     try:
-        db["system_config"].update_one(
-            {"config_id": "main"},
-            {"$set": {"active_campaign": payload.campaign_id}},
-            upsert=True
-        )
+        set_active_campaign_id(db, payload.campaign_id)
         logger.info(f"⚔️ Active Campaign Switched to: {payload.campaign_id}")
         return {"status": "success", "active": payload.campaign_id}
     except Exception as e:

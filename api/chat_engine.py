@@ -1,8 +1,8 @@
 # ===============================================================
 # Script Name: chat_engine.py
 # Script Location: /opt/RealmQuest/api/chat_engine.py
-# Date: 2026-01-27
-# Version: 21.1.0 (Performance & Realism)
+# Date: 2026-01-31
+# Version: 21.1.1 (Canonical campaign id + imagine payload hardening)
 # ===============================================================
 
 import os
@@ -14,6 +14,8 @@ import time
 from fastapi import APIRouter, Response, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from pymongo import MongoClient
+
+from system_config import get_active_campaign_id
 
 router = APIRouter()
 try:
@@ -56,6 +58,11 @@ class ImageRequest(BaseModel):
     kind: str | None = None            # e.g. "npc", "scene", "generic"
     npc_name: str | None = None        # Used when kind == "npc"
     output_filename: str | None = None # Advanced: force filename (server will sanitize)
+
+    # Optional metadata (backwards compatible; prevents gallery/index crashes)
+    player_name: str | None = None
+    discord_id: str | None = None
+    source: str | None = None
 
 class PromptUpdate(BaseModel):
     prompt: str
@@ -154,14 +161,8 @@ SYSTEM_PROMPT_OVERRIDE = ""
 # --- HELPERS ---
 
 def get_active_campaign_name():
-    if db is not None:
-        try:
-            conf = db["system_config"].find_one({"config_id": "audio_registry"})
-            if conf and conf.get("active_campaign"):
-                val = conf.get("active_campaign")
-                if val and val.lower() != "default": return val
-        except: pass
-    return "the_collision_stone"
+    """Canonical active campaign id (split-brain hardened)."""
+    return get_active_campaign_id(db, default=os.getenv("RQ_DEFAULT_CAMPAIGN", "the_collision_stone"))
 
 def get_campaign_paths():
     campaign_name = get_active_campaign_name()

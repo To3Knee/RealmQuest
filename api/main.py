@@ -1,8 +1,8 @@
 # ===============================================================
 # Script Name: main.py
 # Script Location: /opt/RealmQuest/api/main.py
-# Date: 2026-01-27
-# Version: 18.88.1 (User Logic Preserved + Logging)
+# Date: 2026-01-31
+# Version: 18.88.2 (Added roll engine router)
 # ===============================================================
 
 import os
@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from chat_engine import router as chat_router
 from campaign_manager import router as system_router
 from characters import router as characters_router
+from rolls import router as rolls_router
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +50,7 @@ app.mount("/campaigns", StaticFiles(directory="/campaigns"), name="campaigns")
 # --- ROUTERS ---
 app.include_router(chat_router, prefix="/game")
 app.include_router(characters_router, prefix="/game")
+app.include_router(rolls_router, prefix="/game")
 app.include_router(system_router, prefix="/system")
 
 @app.get("/")
