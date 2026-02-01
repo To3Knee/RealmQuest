@@ -2164,6 +2164,7 @@ function DiceEngine({ notify, char }) {
                     modifier: modInt,
                     bonus: bonusInt,
                     attribute: attribute || null,
+                    context: (attribute && attribute !== 'None') ? attribute : null,
                     rolls,
                     grand_total: grandTotal,
                     roll_type: 'custom',
